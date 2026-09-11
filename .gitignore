@@ -1,0 +1,5 @@
+build/
+starforge
+*.o
+*.d
+.DS_Store
