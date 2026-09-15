@@ -25,6 +25,43 @@ so the offline `metal` compiler (which only ships with full Xcode) is never need
 make && ./starforge
 ```
 
+Nothing else is needed: `assets/models.bin` and the textures beside it are
+checked in, and the game finds them relative to the working directory or to the
+executable.
+
+To check the renderer without playing:
+
+```bash
+make bench                        # 300 frames of fps / gpu ms / draws / tris
+./starforge --shot /tmp/s.png --shot-frame 150
+./starforge --stress 200 --bench 300      # load test at 200 units per side
+```
+
+To compare the Blender models against the procedural fallback, move the pack
+aside — the game prints which path it took on stderr:
+
+```bash
+mv assets/models.bin /tmp/ && make bench   # procedural
+mv /tmp/models.bin assets/ && make bench   # model pack
+```
+
+`make meshcheck` audits the mesh library and needs no GPU; `PNG=` renders a
+contact sheet of all twelve meshes in software.
+
+### Rebuilding the models
+
+Only needed if you edit `tools/blender/`. Blender comes from PyPI, so there is
+no Blender install and no GUI:
+
+```bash
+python3.11 -m venv /tmp/bpy && /tmp/bpy/bin/pip install bpy
+/tmp/bpy/bin/python tools/blender/build_models.py   # writes assets/models.bin
+make meshcheck PNG=/tmp/sheet.png                   # audit + look at the result
+```
+
+The `bpy` wheel is **CPython 3.11 only** — it will not install on 3.12 or 3.13.
+Nothing in `make` depends on any of this; the pack is the only output.
+
 ## Controls
 
 | | |
@@ -102,7 +139,8 @@ src/
   sim/      Terrain.*     terraced heightmap, cliffs, carved ramps, water, minimap
             Nav.*         grid A* with string-pulled path smoothing
             Game.*        entities, orders, combat, economy, production, enemy AI
-  gfx/      MeshGen.*     every unit and building, built from primitives in code
+  gfx/      MeshGen.*     procedural geometry, and the model-pack loader
+            ModelPack.h   on-disk layout of assets/models.bin
             Shaders.h     the whole Metal shading language source
             Renderer.*    the Metal backend
   ai/       AI.h          the whole adaptive-opponent architecture
@@ -110,6 +148,9 @@ src/
             Strategy.cpp  influence fields + online strategy selection
             Commander.cpp macro, scouting, tactics, micro
             InfluenceMapGPU.mm  Metal compute backend for the spatial fields
+tools/    mesh_check.cpp      offline audit of the mesh library (no GPU needed)
+          mesh_preview.h      software rasteriser + PNG writer behind --png
+          blender/            Blender authoring for assets/models.bin
   app/      main.mm       AppKit window, RTS camera, input, HUD
 ```
 
@@ -137,6 +178,71 @@ procedurally from slope, altitude and noise, with a detail normal that fades out
 with distance so it never aliases. Buildings extrude out of the ground as they are
 constructed and dissolve on death, both done by discarding fragments against a
 noise threshold. The glyph atlas for the HUD is rasterised with CoreText at launch.
+
+## Models
+
+Ten of the twelve meshes are modelled in Blender and shipped as a single
+binary, `assets/models.bin`:
+
+| Mesh | Triangles | Was |
+|---|---|---|
+| Digger (worker) | 3588 | 140 |
+| Trooper | 2604 | 300 |
+| Mauler hull | 3732 | 416 |
+| Mauler turret | 1620 | 148 |
+| Foundry | 3788 | 304 |
+| Garrison | 2552 | 144 |
+| Workshop | 2576 | 268 |
+| Bunkhouse | 1132 | 176 |
+| Ore seam | 450 | 220 |
+| Boulder | 124 | 168 |
+
+The library totals 22274 triangles against 2392 before. The heaviest unit is
+the Mauler at 5352 for hull plus turret, so a `--stress 200` load is on the
+order of 1.5M triangles, doubled again by the shadow pass. That has not been
+measured on Apple hardware — see **What this is not**.
+
+Projectiles and the selection ring are still built from primitives in
+`MeshGen.cpp` — a box and a flat ring gain nothing from a modelling package.
+
+What the triangles are actually spent on, in order of how much each changes the
+read at RTS camera distance:
+
+1. **Silhouette.** At a hundred metres a unit is an outline, so the shapes are
+   built around their outlines: the Digger is a raked wedge with a cutter arm
+   out front and an ore drum slung across the back, the Trooper has oversized
+   pauldrons over a pinched waist, the Mauler is an arrow with a stepped engine
+   deck, the Workshop sits under a straddle crane, the Foundry steps three
+   times from a buttressed base to a narrow head. Detail added to a box still
+   reads as a box.
+2. **Value range.** The palette these replace put nearly every surface at 0.70
+   albedo, roughly four times what `buildScene` is calibrated for, so
+   everything clipped toward white and no amount of geometry showed through.
+   The pack spans 0.04 to 0.46.
+3. **Bevels**, so plates catch a specular highlight instead of reading as one
+   flat tone, plus recessed panels, hatches and vents.
+4. **Mechanical parts the primitives only implied** — tracks modelled as loops
+   with the running gear visible inside them, road wheels distinct from drive
+   sprockets, jointed limbs, a stepped gun barrel with a slotted brake.
+
+**The pack is optional.** Delete it and the game runs on the primitives, the
+same way it runs without `assets/` textures. Nothing in the build depends on
+Blender: it is an offline authoring tool (`pip install bpy`, CPython 3.11) and
+`tools/blender/build_models.py` is the whole of it. The loader validates the
+magic, version, every count against the real file size and every index against
+the mesh that owns it, and abandons the whole pack on any failure rather than
+leaving a half-built library.
+
+Vertices are stored in 20 bytes rather than the 64 the GPU consumes: positions
+at full precision, normals as `int16` snorm (about 0.003 degrees of error), and
+one index into a shared material palette instead of eight floats repeated on
+every vertex. That is what keeps the file under a megabyte.
+
+`make meshcheck` audits the result — winding, degenerate triangles, bounds, and
+the per-mesh `radius` and `height` the selection ring and health bar are sized
+from — and with `PNG=` renders every mesh in software. It needs no GPU and no
+Mac, which is the only reason any of this could be checked at all off Apple
+hardware.
 
 ## Textures
 
@@ -362,6 +468,7 @@ starforge [--seed N] [--bench FRAMES] [--shot PATH] [--shot-frame N]
           [--hover-button N] [--fs-debug] [--mouse-test] [--adapt-test]
 
 make aieval [GAMES=8] [SECS=600]     # headless AI evaluation
+make meshcheck [PACK=...] [PNG=...]  # offline mesh audit, no GPU required
 ```
 
 `--shot` renders to a PNG and exits, and `--bench` prints frame statistics — both
@@ -477,10 +584,20 @@ reproducible with `--msaa`, `--shadow-res`, `--render-scale` and `--no-bloom`.
 
 Honest scope, so nothing here is oversold:
 
-- **The geometry is procedural; the surfaces are not.** Every mesh is still
-  assembled from boxes, cylinders and spheres in `MeshGen.cpp` — there are no
-  sculpted models and no skeletal animation. Surface detail now comes from four
-  generated textures in `assets/`, so the project is no longer asset-free.
+- **The models are built in Blender, but there is still no animation.** The
+  eight unit and building meshes are authored by script in Blender and shipped
+  as `assets/models.bin`; ore, boulders, projectiles and the selection ring are
+  still assembled from primitives in `MeshGen.cpp`, which also remains the
+  complete fallback if the pack is missing. Nothing is sculpted by hand, there
+  are no skeletons and no skeletal animation — units still animate by
+  transforming whole meshes. Surface detail comes from generated textures in
+  `assets/`, so the project is no longer asset-free.
+- **The model pack's GPU cost is unmeasured.** The meshes were authored and
+  audited on a machine without Metal, so `--bench` and `--shot` have not been
+  run against them. The triangle budget is roughly 9x what it was, there is no
+  level of detail, and the shadow pass redraws everything — so `--bench 300`
+  and `--stress 200` are the first things to check on a Mac. Dropping the pack
+  restores the old numbers exactly.
 - **No sound.** No audio engine at all.
 - **No multiplayer**, no campaign, no save/load, one map archetype.
 - **Fog of war is partial.** It hides enemy units and dims the minimap, but the

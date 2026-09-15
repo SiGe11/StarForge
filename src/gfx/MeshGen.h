@@ -51,8 +51,15 @@ private:
 };
 
 // Emits every mesh in MeshId order into one shared buffer pair.
+//
+// `modelPackPath`, when non-null, points at a Blender-authored model pack
+// (assets/models.bin). Meshes present in the pack replace their procedural
+// version; anything missing, or the whole pack if it fails to validate, falls
+// back to the primitives below. Passing null is the pure-procedural path, so
+// the game still builds and runs with assets/ deleted.
 void buildMeshLibrary(std::vector<MeshVertex>& outVerts,
                       std::vector<uint32_t>&   outIdx,
-                      MeshRange                outRanges[MESH_COUNT]);
+                      MeshRange                outRanges[MESH_COUNT],
+                      const char*              modelPackPath = nullptr);
 
 } // namespace sf

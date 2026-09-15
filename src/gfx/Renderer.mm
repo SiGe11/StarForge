@@ -443,8 +443,17 @@ bool Renderer::init(void* caMetalLayer, const Terrain& terrain, std::string& err
     };
     uploadTerrain(p, terrain);
 
+    // Blender-authored geometry if assets/models.bin is there, the primitives
+    // in MeshGen.cpp if it is not -- the same optional-asset contract as the
+    // textures above. findAsset lives here rather than in MeshGen because
+    // resolving a path beside the executable needs NSBundle, and the layering
+    // rule keeps Apple APIs out of the portable sources.
     std::vector<MeshVertex> mv; std::vector<uint32_t> mi;
-    buildMeshLibrary(mv, mi, p->ranges);
+    std::string packPath = findAsset("models.bin");
+    buildMeshLibrary(mv, mi, p->ranges, packPath.empty() ? nullptr : packPath.c_str());
+    if (packPath.empty())
+        fprintf(stderr, "starforge: assets/models.bin not found, "
+                        "using procedural geometry\n");
     // Fold baseVertex into the indices so every draw can use baseVertex 0.
     for (int m = 0; m < MESH_COUNT; m++) {
         for (uint32_t k = 0; k < p->ranges[m].indexCount; k++)

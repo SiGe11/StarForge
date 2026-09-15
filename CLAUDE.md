@@ -26,7 +26,16 @@ without a human at the keyboard — use them, don't ask the user to eyeball thin
 ```bash
 ./starforge --shot out.png --shot-frame 150   # render N frames, write a PNG, exit
 ./starforge --bench 300                        # print fps / gpu ms / draws / instances / tris
+make meshcheck                                 # audit the mesh library; no GPU, no Mac
+make meshcheck PNG=/tmp/sheet.png              # ...and render a contact sheet of all 12
 ```
+
+`make meshcheck` is the one check that runs on a machine without Metal. It
+builds the same vertex/index soup the renderer uploads and audits winding,
+degenerate triangles, bounds, per-mesh `radius`/`height` and triangle budget;
+with `PNG=` it also rasterises every mesh in software (`tools/mesh_preview.h`),
+which is the only way to look at a model at all off a Mac. It exits non-zero on
+failure, so it works as a pre-commit gate.
 
 Other flags: `--seed N`, `--speed X`, `--cam-dist D`, `--cam-yaw R`,
 `--stress N` (spawns N units per side for load testing), `--select-all`
@@ -95,16 +104,42 @@ reordering. `packed_float3` on the MSL side is what makes the 32-byte
 
 ### Meshes
 
-Everything visible is generated in `gfx/MeshGen.cpp` from boxes, cylinders,
-spheres and jittered blobs. All meshes go into one shared vertex/index buffer
-pair; at upload `Renderer::init` folds each mesh's `baseVertex` into its indices
-so every draw uses `baseVertex: 0`.
+All meshes go into one shared vertex/index buffer pair; at upload
+`Renderer::init` folds each mesh's `baseVertex` into its indices so every draw
+uses `baseVertex: 0`.
 
 Meshes are wound **counter-clockwise as seen from outside**, and the renderer
 sets `frontFacingWinding: CCW` + `cullMode: back`. A primitive wound the wrong
 way is invisible rather than obviously broken, so after touching `MeshBuilder`,
 validate: for each triangle, the geometric normal `cross(b-a, c-a)` must agree
-with the average of the three stored vertex normals.
+with the average of the three stored vertex normals. `make meshcheck` does
+exactly that and runs anywhere, Mac or not.
+
+There are two sources of geometry, and the second one is optional:
+
+- `gfx/MeshGen.cpp` builds every mesh from boxes, cylinders, spheres and
+  jittered blobs. This is the fallback and it must keep working on its own.
+- `assets/models.bin` holds Blender-authored versions of ten of the twelve
+  meshes, authored by `tools/blender/build_models.py` and loaded by
+  `readModelPack` in MeshGen.cpp. The projectile and the selection ring stay
+  procedural -- a box and a flat ring gain nothing from a modelling package.
+
+Delete `assets/models.bin` and the game still runs, just with the primitives;
+this is the same contract as the textures beside it. **Nothing in the build
+depends on Blender** -- it is an offline authoring tool, `bpy` from PyPI, and
+the pack is the only thing it produces.
+
+Two properties the pack must preserve, because the rest of the game reads them
+off `MeshRange`:
+
+- `radius` sizes the **selection ring** (`max(D.radius * 1.15, meshR * 1.06)`),
+  so a part hanging off the back of a model -- a drive sprocket overhanging its
+  track, say -- silently inflates the ring under every unit of that type.
+- `height` positions the **health bar** and the **build-in dissolve cutoff**, so
+  a stack poking above the roofline lifts both.
+
+`make meshcheck` prints both next to the triangle counts. Compare against the
+procedural numbers (run it with no argument) before accepting a new pack.
 
 ### Entities
 
@@ -257,6 +292,96 @@ and run-to-run variance is about +/-1 ms.
   cache is not; a fetch only wins when neighbouring pixels want neighbouring
   texels. Check any sampler fed by a perspective divide for this.
 
+- **The software preview must mirror `buildScene`, not approximate it.**
+  `tools/mesh_preview.h` hardcodes the sun direction, intensity, colour,
+  ambient and exposure from `app/main.mm`, plus the exact composite chain
+  (Narkowicz ACES, explicit 1/2.2 gamma because the drawable is `BGRA8Unorm`
+  rather than sRGB, then the 1.20 saturation lift). An earlier version
+  estimated all five, which is the mistake the calibrated-set note warns
+  about in another form: it rendered a neutral white key instead of the warm
+  (1.00, 0.90, 0.74) one and at roughly half the real exposure, so it was not
+  predicting what the game would show. If `buildScene` is retuned, retune this
+  with it.
+
+- **Silhouette is the whole game at RTS camera distance.** The first pass at
+  the Blender models ported dimensions straight across from MeshGen.cpp and
+  added bevels and panel insets to them. Triangle count went up nine times and
+  the result looked the same, because every shape was still a rectangular
+  prism and detail below a few pixels does not survive the camera. What
+  changed the read was rebuilding the outlines: `frustum()` (a box whose top
+  face has its own X and Z scale and can be slid sideways) is what most of
+  them are made of, because it is the cheapest way to get a shape that is not
+  a box. Judge a model by its cast shadow, not by its wireframe.
+
+- **The old palette was about four times too bright.** Nearly every surface
+  was at 0.70 albedo, against a `buildScene` calibrated so ~0.18 lands near
+  mid-grey after ACES and gamma. Everything clipped toward white, so no
+  geometry read regardless of how much of it there was. The model pack's
+  palette spans 0.04 to 0.46; `MeshGen.cpp`'s procedural palette has **not**
+  been changed to match, so the fallback still renders brighter than the pack.
+
+- **Rock needs flat shading, and 38 degrees is not enough to get it.**
+  `SMOOTH_ANGLE` averages normals across any two faces meeting at less than 38
+  degrees, which is what lets a bevel blend into the curve it rounds. The
+  facets of a displaced-sphere rock meet at 20 to 30 degrees, so the same rule
+  smooths the entire surface and stone renders as a balloon. `mark_flat()`
+  opts a part out and keeps its face normals.
+
+- **Selecting a plate by angle fails on a plate that is itself tilted.** The
+  bevel-strip trap below has a second form that a tighter angle cannot fix. A
+  battered fortress wall leans about 14 degrees, so any threshold loose enough
+  to admit the wall also admits its bevel trim, and one tight enough to
+  exclude the trim excludes the wall as well -- measured at 15 degrees it
+  selected five faces and tore the part open, at 8 degrees it selected none.
+  Area separates them at any slope, because a wall is orders of magnitude
+  larger than the strips around it: `face_plate()` takes the largest candidate
+  and anything within 45% of it. Use it for anything that gets inset;
+  `face_facing()` is only safe on a genuinely axis-aligned face.
+
+- **Selecting faces by normal after a bevel picks up the bevel.** The Blender
+  models are bevelled before anything is selected on them, and an n-segment
+  bevel replaces each sharp edge with faces at evenly spaced angles -- 30 and
+  60 degrees for the two-segment bevel used throughout. A loose "faces pointing
+  +Z" test therefore returns the plate *and* the ring of strips wrapped around
+  it, and `inset_region` over a ring of corner strips does not recess a panel,
+  it tears the part open. That inflated the trooper's torso from 0.76 units
+  wide to 1.67 and put two spikes through its hips -- with every triangle
+  perfectly wound, so the winding audit passed. `face_facing` now thresholds on
+  an angle (15 degrees), which excludes bevel faces with margin.
+
+- **Aspect ratio cannot detect torn geometry; intended bounds can.** The
+  obvious follow-up check -- flag long thin triangles -- is useless here,
+  because bevelling a 5-metre plate by 2 cm legitimately produces triangles
+  with aspect ratios in the hundreds. It fired on the untouched procedural ore
+  mesh. What works is the one fact only the authoring side has: how big the
+  part was asked to be. `sf_model.check_bounds()` records each primitive's
+  requested box, carries it through transforms, and raises at export if the
+  part has escaped it.
+
+- **Radial placement has two independent ways to be wrong.** `create_cone` puts
+  its first vertex at angle 0, so the flat faces of an octagonal drum are
+  centred half a segment round -- placing a rib at `i*2pi/seg` straddles a
+  corner. And a rotation of theta about Y sends +Z to
+  `(sin theta, 0, cos theta)`, so pointing a part outward needs `pi/2 - a`, not
+  `-a`. Getting the second one wrong leaves ribs lying across their wall
+  rather than standing out of it, which survives a glance. Use `face_angle()`
+  and `orient_radial()` in `build_models.py` rather than open-coding either.
+
+- **A band on a tapered drum has to beat the taper at that exact height.** The
+  foundry's window band was authored at radius 3.57 against a drum that is 3.62
+  wide where the band sits, so it rendered nothing at all -- emissive geometry
+  buried inside the hull costs triangles and produces no symptom beyond the
+  detail silently not being there. `cone_radius_at()` derives the radius
+  instead. `make meshcheck` reports emissive coverage over a full orbit, but
+  only per mesh: it catches a model whose glow is *entirely* buried, not one
+  band of several, so the contact sheet is still the review that matters.
+
+- **`MeshBuilder::sphere` used to emit degenerate polar triangles.** The polar
+  rings collapse to a point at one end, so a quad there has two coincident
+  corners. They were zero-area and rasterised to nothing, but they cost index
+  bandwidth and their geometric normals are pure sin/cos rounding noise, which
+  makes any winding audit report them as backfacing. The poles are fans now.
+
 - **Unit names are data and will get longer.** Command card labels are drawn from
   `UnitDef::name`, and the rename from "Depot" to "Bunkhouse" ran straight off the
   edge of the button. The label now measures itself with `textWidth` and shrinks
@@ -349,8 +474,11 @@ and run-to-run variance is about +/-1 ms.
 
 - **Camera is on the arrow keys**, not WASD, so the letter keys stay free for
   commands the way StarCraft binds them. Don't rebind camera onto letters.
-- Geometry stays procedural (`MeshGen.cpp`). Surface detail comes from the four
-  textures in `assets/`; the game must keep working when that directory is
-  missing (`U.misc.z` is the strength flag, 0 = procedural fallback).
+- Geometry is either procedural (`MeshGen.cpp`) or Blender-authored through
+  `assets/models.bin` -- see **Meshes**. Whichever is edited, the procedural
+  path must still produce a complete, correct library on its own. Surface
+  detail comes from the four textures in `assets/`; the game must keep working
+  when that directory is missing (`U.misc.z` is the strength flag, 0 =
+  procedural fallback).
 - MSAA targets are `storageModeMemoryless` and resolve on store — they never
   leave tile memory on Apple GPUs. Keep new render targets in that pattern.
