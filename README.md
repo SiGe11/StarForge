@@ -149,14 +149,19 @@ single binary, `assets/models.bin`:
 
 | Mesh | Triangles | Was |
 |---|---|---|
-| Digger (worker) | 2828 | 140 |
+| Digger (worker) | 3156 | 140 |
 | Trooper | 3064 | 300 |
-| Mauler hull | 3292 | 416 |
+| Mauler hull | 3772 | 416 |
 | Mauler turret | 1600 | 148 |
 | Foundry | 3788 | 304 |
 | Garrison | 2036 | 144 |
 | Workshop | 1624 | 268 |
 | Bunkhouse | 2032 | 176 |
+
+The library totals 21568 triangles against 2392 before. The heaviest unit is
+the Mauler at 5372 for hull plus turret, so a `--stress 200` load is on the
+order of 1.5M triangles, doubled again by the shadow pass. That has not been
+measured on Apple hardware — see **What this is not**.
 
 Ore seams, boulders, projectiles and the selection ring are still built from
 primitives in `MeshGen.cpp` — a jittered blob, a box and a flat ring gain
@@ -535,6 +540,12 @@ Honest scope, so nothing here is oversold:
   are no skeletons and no skeletal animation — units still animate by
   transforming whole meshes. Surface detail comes from generated textures in
   `assets/`, so the project is no longer asset-free.
+- **The model pack's GPU cost is unmeasured.** The meshes were authored and
+  audited on a machine without Metal, so `--bench` and `--shot` have not been
+  run against them. The triangle budget is roughly 9x what it was, there is no
+  level of detail, and the shadow pass redraws everything — so `--bench 300`
+  and `--stress 200` are the first things to check on a Mac. Dropping the pack
+  restores the old numbers exactly.
 - **No sound.** No audio engine at all.
 - **No multiplayer**, no campaign, no save/load, one map archetype.
 - **Fog of war is partial.** It hides enemy units and dims the minimap, but the
