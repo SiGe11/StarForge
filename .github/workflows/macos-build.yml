@@ -1,0 +1,114 @@
+# Builds and exercises StarForge on Apple Silicon.
+#
+# The project targets arm64 + Metal + Cocoa, so it cannot be compiled anywhere
+# else. This job exists so a change can be validated without a Mac in front of
+# the author: it is the only arm64 Mac available to an agent working on this
+# repository.
+#
+# Everything past the build is best effort. A CI runner is not a workstation --
+# there may be no window server session and the GPU is virtualised -- so the
+# render steps carry continue-on-error and a watchdog. Per CLAUDE.md a GUI
+# build here never exits on its own unless --bench or --shot is given, and
+# `timeout` is not installed on macOS.
+
+name: macOS build
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15          # Apple Silicon
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          echo "arch: $(uname -m)"
+          sw_vers
+          clang++ --version | head -2
+
+      - name: Build
+        run: |
+          set -o pipefail
+          make 2>&1 | tee /tmp/build.log
+          echo "--- binary ---"
+          ls -la starforge
+          file starforge
+
+      - name: Mesh audit (model pack)
+        run: make meshcheck
+
+      - name: Mesh audit (procedural fallback)
+        run: make meshcheck PACK=
+
+      - name: Benchmark -- model pack
+        id: bench_pack
+        continue-on-error: true
+        run: |
+          set +e
+          ( ./starforge --bench 300 --no-help > /tmp/bench_pack.txt 2>&1 & APP=$!
+            ( sleep 180; kill -9 $APP 2>/dev/null ) & WD=$!
+            wait $APP; RC=$?; kill $WD 2>/dev/null; exit $RC )
+          echo "exit: $?"
+          echo "=== BENCH (pack) ==="; cat /tmp/bench_pack.txt
+
+      - name: Benchmark -- procedural fallback
+        continue-on-error: true
+        run: |
+          set +e
+          mv assets/models.bin /tmp/models.bin
+          ( ./starforge --bench 300 --no-help > /tmp/bench_proc.txt 2>&1 & APP=$!
+            ( sleep 180; kill -9 $APP 2>/dev/null ) & WD=$!
+            wait $APP; RC=$?; kill $WD 2>/dev/null; exit $RC )
+          echo "exit: $?"
+          mv /tmp/models.bin assets/models.bin
+          echo "=== BENCH (procedural) ==="; cat /tmp/bench_proc.txt
+
+      - name: Stress test
+        continue-on-error: true
+        run: |
+          set +e
+          ( ./starforge --stress 200 --bench 300 --no-help > /tmp/stress.txt 2>&1 & APP=$!
+            ( sleep 240; kill -9 $APP 2>/dev/null ) & WD=$!
+            wait $APP; RC=$?; kill $WD 2>/dev/null; exit $RC )
+          echo "exit: $?"
+          echo "=== STRESS 200/side ==="; cat /tmp/stress.txt
+
+      - name: Screenshot
+        id: shot
+        continue-on-error: true
+        run: |
+          set +e
+          ( ./starforge --shot /tmp/shot.png --shot-frame 150 --select-all --no-help \
+              > /tmp/shot.log 2>&1 & APP=$!
+            ( sleep 180; kill -9 $APP 2>/dev/null ) & WD=$!
+            wait $APP; RC=$?; kill $WD 2>/dev/null; exit $RC )
+          echo "exit: $?"
+          cat /tmp/shot.log
+          ls -la /tmp/shot.png || exit 0
+          # Inline a downscaled copy in the log: workflow artifacts cannot be
+          # read back through the API this runs under, but log text can.
+          sips -Z 620 -s format jpeg -s formatOptions 45 /tmp/shot.png \
+               --out /tmp/shot.jpg >/dev/null 2>&1
+          echo "shot bytes: $(wc -c < /tmp/shot.jpg)"
+          echo "===BEGIN_SHOT_B64==="
+          base64 -i /tmp/shot.jpg
+          echo "===END_SHOT_B64==="
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: starforge-macos
+          path: |
+            /tmp/shot.png
+            /tmp/bench_pack.txt
+            /tmp/bench_proc.txt
+            /tmp/stress.txt
+          if-no-files-found: ignore
