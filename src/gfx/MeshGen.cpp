@@ -1,5 +1,8 @@
 #include "MeshGen.h"
+#include "ModelPack.h"
 #include "../core/Random.h"
+#include <cstdio>
+#include <cstring>
 
 namespace sf {
 
@@ -83,14 +86,31 @@ void MeshBuilder::cyl(v3 base, float r0, float r1, float h, int seg, bool caps) 
 void MeshBuilder::sphere(v3 c, float r, int seg, int rings) {
     for (int y = 0; y < rings; y++) {
         float t0 = PI * y / rings, t1 = PI * (y + 1) / rings;
+        // The polar rings collapse to a point at one end, so they are fans of
+        // triangles rather than quads. Emitting a quad there gives every
+        // segment a sliver whose two coincident corners differ only by sin/cos
+        // rounding: zero area, so it rasterises to nothing, but it costs index
+        // bandwidth and its geometric normal is noise, which fails any
+        // winding audit.
+        bool topPole = (y == 0), botPole = (y == rings - 1);
         for (int x = 0; x < seg; x++) {
             float p0 = TAU * x / seg, p1 = TAU * (x + 1) / seg;
             auto sp = [&](float th, float ph) {
                 return v3{std::sin(th)*std::cos(ph), std::cos(th), std::sin(th)*std::sin(ph)};
             };
             v3 n00 = sp(t0,p0), n10 = sp(t0,p1), n01 = sp(t1,p0), n11 = sp(t1,p1);
-            quad(addVert(c + n00*r, n00), addVert(c + n10*r, n10),
-                 addVert(c + n11*r, n11), addVert(c + n01*r, n01));
+            if (topPole) {
+                // n00 and n10 are both the north pole; use the ring's own
+                // normal for the apex so the shading still matches the face.
+                v3 na = normalize(n01 + n11);
+                tri(addVert(c + v3{0, r, 0}, na), addVert(c + n11*r, n11), addVert(c + n01*r, n01));
+            } else if (botPole) {
+                v3 na = normalize(n00 + n10);
+                tri(addVert(c + n00*r, n00), addVert(c + n10*r, n10), addVert(c + v3{0, -r, 0}, na));
+            } else {
+                quad(addVert(c + n00*r, n00), addVert(c + n10*r, n10),
+                     addVert(c + n11*r, n11), addVert(c + n01*r, n01));
+            }
         }
     }
 }
@@ -352,24 +372,140 @@ static void buildSelRing(MeshBuilder& b) {
     b.ringFlat({0, 0, 0}, 0.91f, 1.0f, 48);
 }
 
+// ---------------------------------------------------------------- model pack
+//
+// assets/models.bin holds the Blender-authored versions of the meshes below.
+// It is optional in every direction: no file, a malformed file, or a file
+// covering only some meshes all degrade to the primitives above. See
+// ModelPack.h for the layout and tools/blender/ for the authoring side.
+namespace {
+
+struct PackedMesh {
+    std::vector<MeshVertex> verts;
+    std::vector<uint32_t>   idx;
+    bool present = false;
+};
+
+// Everything here is attacker-grade input as far as the loader is concerned:
+// one bad offset in a file the player can replace would otherwise be an
+// out-of-bounds read. Every count is checked against the actual file size and
+// every index against the mesh that owns it, and any failure abandons the
+// whole pack rather than leaving a half-populated library.
+bool readModelPack(const char* path, PackedMesh out[MESH_COUNT]) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+
+    std::fseek(f, 0, SEEK_END);
+    long sz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (sz < (long)sizeof(PackHeader) || sz > (long)(512 * 1024 * 1024)) {
+        std::fclose(f); return false;
+    }
+
+    std::vector<uint8_t> buf((size_t)sz);
+    size_t got = std::fread(buf.data(), 1, (size_t)sz, f);
+    std::fclose(f);
+    if (got != (size_t)sz) return false;
+
+    PackHeader h{};
+    std::memcpy(&h, buf.data(), sizeof h);
+    if (h.magic != kPackMagic || h.version != kPackVersion) return false;
+    if (h.meshCount == 0 || h.meshCount > (uint32_t)MESH_COUNT) return false;
+    if (h.vertexCount == 0 || h.vertexCount > kPackMaxVerts) return false;
+    if (h.indexCount == 0 || h.indexCount > kPackMaxIndices) return false;
+    if (h.indexCount % 3 != 0) return false;
+    if (h.materialCount == 0 || h.materialCount > kPackMaxMaterials) return false;
+
+    // The file must be exactly the size its own header describes. Computing
+    // this in 64-bit and comparing against the real length is what makes
+    // every offset below safe to take at face value.
+    const uint64_t meshBytes = (uint64_t)h.meshCount * sizeof(PackMesh);
+    const uint64_t matBytes  = (uint64_t)h.materialCount * sizeof(PackMaterial);
+    const uint64_t vtxBytes  = (uint64_t)h.vertexCount * sizeof(PackVertex);
+    const uint64_t idxBytes  = (uint64_t)h.indexCount * sizeof(uint32_t);
+    const uint64_t want = sizeof(PackHeader) + meshBytes + matBytes + vtxBytes + idxBytes;
+    if (want != (uint64_t)sz) return false;
+
+    const uint8_t* pMesh = buf.data() + sizeof(PackHeader);
+    const uint8_t* pMat  = pMesh + meshBytes;
+    const uint8_t* pVtx  = pMat + matBytes;
+    const uint8_t* pIdx  = pVtx + vtxBytes;
+
+    std::vector<PackMaterial> mats(h.materialCount);
+    std::memcpy(mats.data(), pMat, (size_t)matBytes);
+
+    PackedMesh staged[MESH_COUNT];
+    for (uint32_t m = 0; m < h.meshCount; m++) {
+        PackMesh pm{};
+        std::memcpy(&pm, pMesh + (size_t)m * sizeof(PackMesh), sizeof pm);
+        if (pm.meshId < 0 || pm.meshId >= MESH_COUNT) return false;
+        if (staged[pm.meshId].present) return false;           // duplicate entry
+        if (pm.vertexCount == 0 || pm.indexCount == 0) return false;
+        if (pm.indexCount % 3 != 0) return false;
+        if ((uint64_t)pm.firstVertex + pm.vertexCount > h.vertexCount) return false;
+        if ((uint64_t)pm.firstIndex + pm.indexCount > h.indexCount) return false;
+
+        PackedMesh& dst = staged[pm.meshId];
+        dst.verts.resize(pm.vertexCount);
+        for (uint32_t i = 0; i < pm.vertexCount; i++) {
+            PackVertex pv{};
+            std::memcpy(&pv, pVtx + (size_t)(pm.firstVertex + i) * sizeof(PackVertex),
+                        sizeof pv);
+            if (pv.material >= h.materialCount) return false;
+            const PackMaterial& mt = mats[pv.material];
+            MeshVertex& mv = dst.verts[i];
+            mv = MeshVertex{};
+            mv.px = pv.px; mv.py = pv.py; mv.pz = pv.pz;
+            // snorm -> float. The exporter clamps before quantising, so the
+            // magnitude is already within range; renormalising here costs
+            // nothing and keeps a hand-edited file from producing a
+            // non-unit normal that would brighten a face.
+            float nx = pv.nx * (1.0f / 32767.0f);
+            float ny = pv.ny * (1.0f / 32767.0f);
+            float nz = pv.nz * (1.0f / 32767.0f);
+            float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len < 1e-6f) { nx = 0.0f; ny = 1.0f; nz = 0.0f; len = 1.0f; }
+            mv.nx = nx / len; mv.ny = ny / len; mv.nz = nz / len;
+            mv.cr = mt.cr; mv.cg = mt.cg; mv.cb = mt.cb; mv.rough = mt.rough;
+            mv.metal = mt.metal; mv.team = mt.team; mv.emis = mt.emis; mv.ao = mt.ao;
+        }
+        dst.idx.resize(pm.indexCount);
+        for (uint32_t i = 0; i < pm.indexCount; i++) {
+            uint32_t v;
+            std::memcpy(&v, pIdx + (size_t)(pm.firstIndex + i) * sizeof(uint32_t),
+                        sizeof v);
+            if (v >= pm.vertexCount) return false;   // indices are mesh-local
+            dst.idx[i] = v;
+        }
+        dst.present = true;
+    }
+
+    for (int m = 0; m < MESH_COUNT; m++) out[m] = std::move(staged[m]);
+    return true;
+}
+
+} // namespace
+
 // ---------------------------------------------------------------- assembly
 static void emitMesh(std::vector<MeshVertex>& V, std::vector<uint32_t>& I,
-                     MeshRange& R, MeshBuilder& b) {
+                     MeshRange& R,
+                     const std::vector<MeshVertex>& verts,
+                     const std::vector<uint32_t>& idx) {
     R.baseVertex = (int32_t)V.size();
     R.firstIndex = (uint32_t)I.size();
-    R.indexCount = (uint32_t)b.idx.size();
+    R.indexCount = (uint32_t)idx.size();
     float rad = 0.0f, hi = 0.0f;
-    for (const auto& v : b.verts) {
+    for (const auto& v : verts) {
         rad = std::max(rad, std::sqrt(v.px * v.px + v.pz * v.pz));
         hi  = std::max(hi, v.py);
     }
     R.radius = rad; R.height = hi;
-    V.insert(V.end(), b.verts.begin(), b.verts.end());
-    I.insert(I.end(), b.idx.begin(), b.idx.end());
+    V.insert(V.end(), verts.begin(), verts.end());
+    I.insert(I.end(), idx.begin(), idx.end());
 }
 
 void buildMeshLibrary(std::vector<MeshVertex>& V, std::vector<uint32_t>& I,
-                      MeshRange R[MESH_COUNT]) {
+                      MeshRange R[MESH_COUNT], const char* modelPackPath) {
     V.clear(); I.clear();
     using Fn = void (*)(MeshBuilder&);
     const Fn fns[MESH_COUNT] = {
@@ -377,10 +513,20 @@ void buildMeshLibrary(std::vector<MeshVertex>& V, std::vector<uint32_t>& I,
         buildFoundry, buildGarrison, buildWorkshop, buildBunkhouse,
         buildOre, buildRock, buildProjectile, buildSelRing
     };
+    PackedMesh packed[MESH_COUNT];
+    if (modelPackPath && !readModelPack(modelPackPath, packed)) {
+        std::fprintf(stderr, "starforge: %s is not a valid model pack, "
+                             "using procedural geometry\n", modelPackPath);
+    }
+
     for (int i = 0; i < MESH_COUNT; i++) {
-        MeshBuilder b;
-        fns[i](b);
-        emitMesh(V, I, R[i], b);
+        if (packed[i].present) {
+            emitMesh(V, I, R[i], packed[i].verts, packed[i].idx);
+        } else {
+            MeshBuilder b;
+            fns[i](b);
+            emitMesh(V, I, R[i], b.verts, b.idx);
+        }
     }
 }
 

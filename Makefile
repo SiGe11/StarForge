@@ -16,7 +16,7 @@ MM_SRCS  := $(SRC)/gfx/Renderer.mm $(SRC)/ai/InfluenceMapGPU.mm $(SRC)/app/main.
 OBJS     := $(CPP_SRCS:$(SRC)/%.cpp=$(BUILD)/%.o) $(MM_SRCS:$(SRC)/%.mm=$(BUILD)/%.o)
 DEPS     := $(OBJS:.o=.d)
 
-.PHONY: all run clean bench aieval
+.PHONY: all run clean bench aieval meshcheck
 
 all: $(APP)
 
@@ -49,6 +49,18 @@ aieval:
 
 GAMES ?= 8
 SECS  ?= 600
+
+# Offline audit of the mesh library: winding, degenerate triangles, bounds,
+# per-mesh radius/height and triangle budget. Portable C++ with no Metal and no
+# Cocoa, so unlike --shot and --bench it runs on any machine. PACK= points at a
+# model pack (default assets/models.bin if present, else pure procedural);
+# PNG= additionally renders a software contact sheet of all twelve meshes.
+PACK ?= $(wildcard assets/models.bin)
+meshcheck:
+	@mkdir -p $(BUILD)
+	@$(CXX) -std=c++20 -O2 -I$(SRC) -Itools $(WARN) tools/mesh_check.cpp \
+	  $(SRC)/gfx/MeshGen.cpp -o $(BUILD)/mesh_check
+	@$(BUILD)/mesh_check $(PACK) $(if $(PNG),--png $(PNG))
 
 clean:
 	@rm -rf $(BUILD) $(APP)
