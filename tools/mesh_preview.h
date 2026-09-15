@@ -272,13 +272,15 @@ inline void shadeAndDraw(Framebuffer& fb,
                          const MeshRange& R, const Cam& cam,
                          v3 teamColor, float ox, float oy, float scl,
                          const ShadowMap* sm = nullptr) {
-    const v3 sunDir = normalize(v3{0.62f, 0.66f, 0.42f});
-    // Calibrated the way CLAUDE.md describes buildScene's set: a ~0.18 albedo
-    // must land near mid-grey once ACES and gamma have been applied. Guessing
-    // these individually is exactly the mistake that note warns about --
-    // at sunIntensity 3.1 every armour surface clipped to white and the
-    // bevels the models were rebuilt for became invisible.
-    const float sunI = 1.25f, ambient = 0.22f, exposure = 1.0f;
+    // Copied from buildScene() in app/main.mm, not estimated. CLAUDE.md warns
+    // that sunIntensity, ambient and exposure are a calibrated set and that
+    // moving one alone clips everything to white; the same applies to
+    // approximating all three, which is what an earlier version of this file
+    // did. Keep these in step with main.mm or the preview stops predicting
+    // what the game will show.
+    const v3 sunDir = normalize(v3{0.78f, 0.56f, -0.28f});
+    const v3 sunCol{1.00f, 0.90f, 0.74f};
+    const float sunI = 2.15f, ambient = 0.30f, exposure = 0.78f;
 
     float cy = std::cos(cam.yaw), sy = std::sin(cam.yaw);
     float cp = std::cos(cam.pitch), sp = std::sin(cam.pitch);
@@ -360,24 +362,28 @@ inline void shadeAndDraw(Framebuffer& fb,
                                       std::max(2.0f, 2.0f / (rough * rough + 1e-3f)));
                 float sky = 0.5f + 0.5f * n.y;
 
+                const v3 fillDir = normalize(v3{-0.55f, 0.35f, -0.75f});
+                float fill = std::max(0.0f, dot(n, fillDir)) * 0.30f;
                 // Weak fill from the opposite side. Without it every surface
                 // facing away from the sun collapses to one ambient value and
                 // the shaded half of a model loses all its form.
-                const v3 fillDir = normalize(v3{-0.55f, 0.35f, -0.75f});
-                float fill = std::max(0.0f, dot(n, fillDir)) * 0.30f;
-                v3 c = alb * (ndl * sunI + fill + ambient * sky * ao)
-                     + v3{1.0f, 0.96f, 0.9f} * (spec * (1.0f - rough) * sunI * 0.5f)
+                v3 c = alb * sunCol * (ndl * sunI)
+                     + alb * (fill + ambient * sky * ao)
+                     + sunCol * (spec * (1.0f - rough) * sunI * 0.35f)
                      + alb * emis;
                 c = c * exposure;
-                // ACES-ish curve, then gamma, so the preview sits in roughly
-                // the same range as the shipped tonemap.
+                // compositeFS: Narkowicz ACES, explicit 1/2.2 gamma (the
+                // drawable is BGRA8Unorm, not sRGB), then a saturation lift.
                 auto tm = [](float v) {
                     v = (v * (2.51f * v + 0.03f)) / (v * (2.43f * v + 0.59f) + 0.14f);
                     return std::pow(saturate(v), 1.0f / 2.2f);
                 };
-                fb.color[di * 3 + 0] = tm(c.x);
-                fb.color[di * 3 + 1] = tm(c.y);
-                fb.color[di * 3 + 2] = tm(c.z);
+                v3 o{tm(c.x), tm(c.y), tm(c.z)};
+                float lum = 0.2126f * o.x + 0.7152f * o.y + 0.0722f * o.z;
+                o = v3{lum, lum, lum} + (o - v3{lum, lum, lum}) * 1.20f;
+                fb.color[di * 3 + 0] = saturate(o.x);
+                fb.color[di * 3 + 1] = saturate(o.y);
+                fb.color[di * 3 + 2] = saturate(o.z);
                 fb.emisMask[di] = (emis > 0.5f) ? 1 : 0;
             }
         }

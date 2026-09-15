@@ -25,6 +25,43 @@ so the offline `metal` compiler (which only ships with full Xcode) is never need
 make && ./starforge
 ```
 
+Nothing else is needed: `assets/models.bin` and the textures beside it are
+checked in, and the game finds them relative to the working directory or to the
+executable.
+
+To check the renderer without playing:
+
+```bash
+make bench                        # 300 frames of fps / gpu ms / draws / tris
+./starforge --shot /tmp/s.png --shot-frame 150
+./starforge --stress 200 --bench 300      # load test at 200 units per side
+```
+
+To compare the Blender models against the procedural fallback, move the pack
+aside — the game prints which path it took on stderr:
+
+```bash
+mv assets/models.bin /tmp/ && make bench   # procedural
+mv /tmp/models.bin assets/ && make bench   # model pack
+```
+
+`make meshcheck` audits the mesh library and needs no GPU; `PNG=` renders a
+contact sheet of all twelve meshes in software.
+
+### Rebuilding the models
+
+Only needed if you edit `tools/blender/`. Blender comes from PyPI, so there is
+no Blender install and no GUI:
+
+```bash
+python3.11 -m venv /tmp/bpy && /tmp/bpy/bin/pip install bpy
+/tmp/bpy/bin/python tools/blender/build_models.py   # writes assets/models.bin
+make meshcheck PNG=/tmp/sheet.png                   # audit + look at the result
+```
+
+The `bpy` wheel is **CPython 3.11 only** — it will not install on 3.12 or 3.13.
+Nothing in `make` depends on any of this; the pack is the only output.
+
 ## Controls
 
 | | |

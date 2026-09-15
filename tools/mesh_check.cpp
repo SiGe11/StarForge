@@ -217,8 +217,9 @@ int main(int argc, char** argv) {
             cam.target = v3{0.0f, R[m].height * 0.42f, 0.0f};
             float ox = (cx + 0.5f) * cw * ss, oy = (cy + 0.5f) * chh * ss;
             float scl = (float)chh * ss * 0.5f;
+            // Same sun as buildScene() in app/main.mm.
             ShadowMap sm = buildShadow(V, I, R[m],
-                                       normalize(v3{0.62f, 0.66f, 0.42f}));
+                                       normalize(v3{0.78f, 0.56f, -0.28f}));
             drawGround(fb, cam, ox, oy, scl, std::max(R[m].radius, 0.6f), &sm);
             shadeAndDraw(fb, V, I, R[m], cam, v3{0.30f, 0.55f, 0.95f},
                          ox, oy, scl, &sm);

@@ -292,6 +292,17 @@ and run-to-run variance is about +/-1 ms.
   cache is not; a fetch only wins when neighbouring pixels want neighbouring
   texels. Check any sampler fed by a perspective divide for this.
 
+- **The software preview must mirror `buildScene`, not approximate it.**
+  `tools/mesh_preview.h` hardcodes the sun direction, intensity, colour,
+  ambient and exposure from `app/main.mm`, plus the exact composite chain
+  (Narkowicz ACES, explicit 1/2.2 gamma because the drawable is `BGRA8Unorm`
+  rather than sRGB, then the 1.20 saturation lift). An earlier version
+  estimated all five, which is the mistake the calibrated-set note warns
+  about in another form: it rendered a neutral white key instead of the warm
+  (1.00, 0.90, 0.74) one and at roughly half the real exposure, so it was not
+  predicting what the game would show. If `buildScene` is retuned, retune this
+  with it.
+
 - **Silhouette is the whole game at RTS camera distance.** The first pass at
   the Blender models ported dimensions straight across from MeshGen.cpp and
   added bevels and panel insets to them. Triangle count went up nine times and
