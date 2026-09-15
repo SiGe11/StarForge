@@ -42,13 +42,15 @@ import bmesh
 from mathutils import Matrix, Vector
 
 import sf_model as S
-from sf_model import (Model, box, wedge, cyl, tube, sphere, ring_flat, blob,
-                      inset, set_mat, xform, bevel, face_facing, cone_radius_at,
-                      track_loop)
+from sf_model import (Model, box, wedge, frustum, cyl, tube, sphere, ring_flat,
+                      blob, inset, set_mat, xform, bevel, face_facing,
+                      cone_radius_at, track_loop, face_plate,
+                      mark_flat)
 
 # MeshId values, mirroring the enum in src/gfx/RenderTypes.h.
 MESH_WORKER, MESH_TROOPER, MESH_MAULER_HULL, MESH_MAULER_TURRET = 0, 1, 2, 3
 MESH_FOUNDRY, MESH_GARRISON, MESH_WORKSHOP, MESH_BUNKHOUSE = 4, 5, 6, 7
+MESH_ORE, MESH_BOULDER = 8, 9
 
 
 def rot(bm, angle, axis, pivot=(0, 0, 0)):
@@ -81,10 +83,14 @@ def orient_radial(bm, angle, pivot=(0, 0, 0)):
     return rot(bm, math.pi * 0.5 - angle, 'Y', pivot)
 
 
-def panel(bm, axis, sign, thickness, depth, mat=None, max_deg=15.0):
-    """Recess the faces pointing a given way. The workhorse for breaking a
-    large plate into something that reads as panelled armour."""
-    f = face_facing(bm, axis, sign, max_deg)
+def panel(bm, axis, sign, thickness, depth, mat=None, max_deg=42.0):
+    """Recess the plate facing a given way. The workhorse for breaking a
+    large surface into something that reads as panelled armour.
+
+    Uses face_plate rather than face_facing: these parts are bevelled before
+    anything is selected on them, and on a sloped plate an angle test cannot
+    tell the plate from its own trim."""
+    f = face_plate(bm, axis, sign, max_deg)
     if f:
         inset(bm, f, thickness, depth, mat)
     return bm
@@ -160,444 +166,695 @@ def track_unit(m, x, wheel_r, wheel_n, half_len, y_axle, width, tread=True):
 
 
 # ---------------------------------------------------------------- worker
+
 def build_worker():
+    """Digger: a heavy mining crawler.
+
+    Silhouette first. The shape reads as a low forward-raked wedge with one
+    heavy cutter arm reaching out in front and a big ore drum slung across the
+    back -- asymmetric front to back, and unmistakable from a top-down camera
+    at a hundred metres. The version this replaces was a box on tracks with
+    detail added to it, which is a box.
+    """
     m = Model(MESH_WORKER, 'WORKER')
-    track_unit(m, 0.58, 0.22, 4, 0.82, 0.26, 0.34)
+    track_unit(m, 0.60, 0.22, 4, 0.80, 0.26, 0.32)
 
-    # Chassis, panelled on top so the deck is not one flat tone.
-    ch = box((0, 0.62, 0), (0.52, 0.20, 0.76), 'armor_dark', bevel_w=0.05)
-    panel(ch, 'y', 1, 0.09, -0.035, 'shadowed')
-    m.add(ch)
+    # Track shrouds, flared outward at the top so the stance widens upward and
+    # the vehicle stops reading as a rectangular prism.
+    shroud = frustum((0.60, 0.62, -0.05), (0.19, 0.16, 0.74),
+                     top=(1.55, 0.92), shift=(0.07, 0.0), mat='armor_dark',
+                     bevel_w=0.035)
+    m.add_mirrored(shroud)
 
-    # Sloped body. The top is recessed twice: once as a wide deck panel, once
-    # as a narrow service hatch inside it.
-    body = wedge((0, 1.00, -0.05), (0.46, 0.26, 0.62), 0.22, 0.18, 'armor',
-                 bevel_w=0.05)
-    top = face_facing(body, 'y', 1)
-    if top:
-        inner = inset(body, top, 0.07, -0.025, 'armor')
-        if inner:
-            inset(body, inner, 0.10, -0.03, 'shadowed')
-    m.add(body)
+    # Hull: narrow at the base, wider and raked at the deck.
+    hull = frustum((0, 0.68, -0.02), (0.40, 0.26, 0.70), top=(1.18, 0.92),
+                   shift=(0.0, -0.05), mat='armor', bevel_w=0.05)
+    panel(hull, 'y', 1, 0.09, -0.035, 'shadowed')
+    m.add(hull)
 
-    # Ore hopper: an open bin at the back, which gives the silhouette an
-    # asymmetry the original box did not have.
-    hop = box((0, 1.26, -0.50), (0.34, 0.24, 0.24), 'armor_dark', bevel_w=0.04)
-    hf = face_facing(hop, 'y', 1)
-    if hf:
-        inset(hop, hf, 0.055, -0.30, 'shadowed')
-    m.add(hop)
+    # Raked prow, a single sloped plate rather than a flat nose.
+    prow = frustum((0, 0.50, 0.72), (0.38, 0.22, 0.16), top=(0.78, 1.0),
+                   shift=(0.0, -0.13), mat='armor_lit', bevel_w=0.04)
+    rot(prow, math.radians(-34), 'X', (0, 0.50, 0.72))
+    m.add(prow)
+    m.add(box((0, 0.36, 0.80), (0.30, 0.05, 0.10), 'steel', bevel_w=0.02))
 
-    # Cab, team-coloured, with a recessed window frame.
-    cab = box((0, 1.30, 0.16), (0.34, 0.22, 0.38), 'team', bevel_w=0.045)
-    front = face_facing(cab, 'z', 1)
-    if front:
-        inset(cab, front, 0.05, -0.03, 'dark')
+    # Ore drum across the back. This is the mass that carries the silhouette,
+    # so it is deliberately oversized and sits high.
+    drum = cyl((-0.50, 1.28, -0.46), 0.42, 0.42, 1.00, 12, 'armor_dark',
+               axis='x', bevel_w=0.05)
+    m.add(drum)
+    for k in (-1, 1):
+        m.add(cyl((k * 0.50, 1.28, -0.46), 0.45, 0.45, 0.07, 12, 'steel',
+                  axis='x', bevel_w=0.025))
+    # Hopper mouth on top of the drum, open and dark.
+    mouth = box((0, 1.64, -0.46), (0.36, 0.10, 0.30), 'armor_dark', bevel_w=0.03)
+    mf = face_plate(mouth, 'y', 1)
+    if mf:
+        inset(mouth, mf, 0.055, -0.20, 'shadowed')
+    m.add(mouth)
+    # Discharge chute angled off the back.
+    chute = frustum((0, 1.06, -0.86), (0.22, 0.24, 0.12), top=(0.6, 1.0),
+                    shift=(0.0, -0.10), mat='steel', bevel_w=0.03)
+    rot(chute, math.radians(24), 'X', (0, 1.06, -0.86))
+    m.add(chute)
+
+    # Cab: small, canted, and pushed off-centre. A centred cab reads as
+    # symmetrical machinery; an offset one reads as a vehicle with a driver.
+    cab = frustum((-0.30, 1.16, 0.26), (0.28, 0.24, 0.28), top=(0.80, 0.82),
+                  shift=(0.03, -0.02), mat='team', bevel_w=0.04)
     m.add(cab)
-    m.add(box((0, 1.32, 0.55), (0.25, 0.13, 0.03), 'glow_warm', bevel_w=0.02, bevel_seg=1))
+    rot(cab, math.radians(-7), 'Z', (-0.30, 1.16, 0.26))
+    m.add(box((-0.30, 1.22, 0.54), (0.21, 0.13, 0.03), 'glow_warm',
+              bevel_w=0.018, bevel_seg=1))
+    m.add(box((-0.30, 1.44, 0.22), (0.17, 0.035, 0.09), 'dark', bevel_w=0.015))
+    m.add(box((-0.30, 1.48, 0.22), (0.13, 0.025, 0.07), 'glow_dim',
+              bevel_w=0.01, bevel_seg=1))
 
-    # Roof light bar.
-    m.add(box((0, 1.54, 0.20), (0.20, 0.035, 0.09), 'dark', bevel_w=0.015, bevel_seg=1))
-    m.add(box((0, 1.575, 0.20), (0.15, 0.025, 0.07), 'glow_dim', bevel_w=0.01, bevel_seg=1))
+    # Cutter arm: one heavy limb, forward and down, ending in a toothed disc.
+    # A single big arm beats two small ones -- it breaks the symmetry and
+    # gives the front of the model something to be.
+    m.add(box((0.34, 0.86, 0.34), (0.13, 0.15, 0.13), 'steel', bevel_w=0.03))
+    upper = box((0.34, 0.80, 0.60), (0.10, 0.10, 0.26), 'armor_dark', bevel_w=0.028)
+    rot(upper, math.radians(14), 'X', (0.34, 0.86, 0.34))
+    m.add(upper)
+    m.add(cyl((0.34, 0.66, 0.84), 0.12, 0.12, 0.20, 8, 'dark', axis='x',
+              bevel_w=0.022))
+    fore = box((0.34, 0.55, 1.00), (0.085, 0.085, 0.22), 'steel', bevel_w=0.025)
+    rot(fore, math.radians(-26), 'X', (0.34, 0.66, 0.84))
+    m.add(fore)
+    # Hydraulic ram alongside the arm, a cheap read of "this thing moves".
+    m.add(cyl((0.50, 0.92, 0.48), 0.045, 0.045, 0.34, 6, 'steel', axis='z',
+              bevel_w=0.0))
 
-    # Fusion cutter arms: upper arm, elbow, forearm, emitter. Jointing is what
-    # separates a mining rig from two boxes stuck to the front.
-    upper = box((0.46, 0.80, 0.50), (0.075, 0.075, 0.30), 'steel', bevel_w=0.025)
-    m.add_mirrored(upper)
-    elbow = cyl((0.46, 0.80, 0.80), 0.10, 0.10, 0.17, 8, 'dark', axis='x', bevel_w=0.02)
-    xform(elbow, Matrix.Translation(Vector((-0.085, 0, 0))))
-    m.add_mirrored(elbow)
-    fore = box((0.46, 0.78, 0.96), (0.065, 0.065, 0.19), 'steel', bevel_w=0.02)
-    rot(fore, math.radians(-8), 'X', (0.46, 0.80, 0.80))
-    m.add_mirrored(fore)
-    tip = cyl((0.46, 0.755, 1.10), 0.055, 0.035, 0.10, 8, 'dark', axis='z', bevel_w=0.015)
-    m.add_mirrored(tip)
-    m.add_mirrored(sphere((0.46, 0.755, 1.175), 0.045, 8, 6, 'glow_warm'))
+    # Rotary cutter head.
+    head_z = 1.14
+    m.add(cyl((0.34, 0.44, head_z), 0.24, 0.24, 0.11, 14, 'armor_dark',
+              axis='z', bevel_w=0.03))
+    m.add(cyl((0.34, 0.44, head_z + 0.06), 0.11, 0.09, 0.07, 10, 'steel',
+              axis='z', bevel_w=0.015))
+    for k in range(8):
+        a = 2.0 * math.pi * k / 8
+        t = box((0.34 + math.cos(a) * 0.255, 0.44 + math.sin(a) * 0.255, head_z),
+                (0.045, 0.045, 0.07), 'steel', bevel_w=0.0)
+        m.add(t)
 
-    # Antenna and its base.
-    m.add(cyl((0.30, 1.48, -0.30), 0.055, 0.045, 0.06, 8, 'dark', bevel_w=0.012))
-    m.add(cyl((0.30, 1.52, -0.30), 0.022, 0.012, 0.48, 6, 'steel', bevel_w=0.0))
+    # Exhaust stack and antenna, both behind the cab so the roofline is broken.
+    m.add(tube((0.30, 1.30, -0.02), 0.085, 0.055, 0.42, 8, 'dark', axis='y'))
+    m.add(cyl((0.44, 1.10, 0.06), 0.05, 0.04, 0.06, 8, 'dark', bevel_w=0.012))
+    m.add(cyl((0.44, 1.14, 0.06), 0.02, 0.012, 0.84, 6, 'steel', bevel_w=0.0))
     return m
 
 
 # ---------------------------------------------------------------- trooper
+
 def build_trooper():
+    """Trooper: powered infantry.
+
+    Read at distance comes from proportion, not detail. The shoulders are
+    deliberately enormous and team-coloured, the waist is pinched, the boots
+    are heavy, and the head is small and sunk between the pauldrons so there
+    is no neck -- a caricature, because a realistically proportioned figure
+    twenty metres from the camera is a grey smudge.
+    """
     m = Model(MESH_TROOPER, 'TROOPER')
 
-    # Legs: thigh, knee, shin, boot. The original was one box per leg.
-    for side, zoff in ((1, 0.06), (-1, -0.06)):
-        x = 0.26 * side
-        thigh = box((x, 0.62, zoff), (0.15, 0.26, 0.18), 'armor_dark', bevel_w=0.04)
+    # Legs: splayed, heavy thighs, armoured shins, wide boots.
+    for side in (1, -1):
+        x = 0.27 * side
+        m.add(box((x, 0.78, -0.02), (0.14, 0.13, 0.17), 'dark', bevel_w=0.03))
+        thigh = frustum((x, 0.58, 0.0), (0.155, 0.20, 0.19), top=(1.12, 1.05),
+                        mat='armor', bevel_w=0.04)
+        rot(thigh, math.radians(-5 * side), 'Z', (x, 0.78, 0))
         m.add(thigh)
-        knee = cyl((x, 0.36, zoff), 0.14, 0.14, 0.26, 8, 'dark', axis='x', bevel_w=0.025)
-        xform(knee, Matrix.Translation(Vector((-0.13, 0, 0))))
-        m.add(knee)
-        shin = box((x, 0.20, zoff + 0.02), (0.13, 0.20, 0.16), 'armor_dark', bevel_w=0.035)
+        m.add(cyl((x, 0.36, 0.0), 0.135, 0.135, 0.24, 8, 'dark', axis='x',
+                  bevel_w=0.025))
+        xform(m.parts[-1], Matrix.Translation(Vector((-0.12, 0, 0))))
+        shin = frustum((x, 0.21, 0.02), (0.145, 0.17, 0.16), top=(0.88, 1.0),
+                       mat='armor_dark', bevel_w=0.035)
         m.add(shin)
-        boot = box((x, 0.07, zoff + 0.08), (0.18, 0.08, 0.26), 'dark', bevel_w=0.035)
+        # Shin plate, team, on the silhouette edge where it will be seen.
+        m.add(box((x, 0.24, 0.17), (0.115, 0.15, 0.04), 'team', bevel_w=0.02))
+        boot = frustum((x, 0.07, 0.07), (0.175, 0.07, 0.25), top=(0.85, 0.88),
+                       mat='dark', bevel_w=0.03)
         m.add(boot)
-        # Shin plate, team-coloured.
-        m.add(box((x, 0.22, zoff + 0.16), (0.11, 0.16, 0.035), 'team_dark', bevel_w=0.02))
+        m.add(box((x, 0.03, 0.22), (0.15, 0.03, 0.08), 'steel', bevel_w=0.015))
 
-    # Torso with a recessed chest plate and an abdomen segment.
-    torso = wedge((0, 1.30, 0), (0.38, 0.40, 0.25), 0.15, 0.10, 'armor', bevel_w=0.045)
-    chest = face_facing(torso, 'z', 1)
-    if chest:
-        inner = inset(torso, chest, 0.07, -0.028, 'armor')
+    # Waist, pinched, then a chest that flares out and up.
+    m.add(frustum((0, 0.98, 0.0), (0.20, 0.13, 0.16), top=(1.25, 1.2),
+                  mat='dark', bevel_w=0.03))
+    chest = frustum((0, 1.32, -0.01), (0.27, 0.23, 0.20), top=(1.42, 1.18),
+                    shift=(0.0, 0.02), mat='armor', bevel_w=0.05)
+    cf = face_plate(chest, 'z', 1)
+    if cf:
+        inner = inset(chest, cf, 0.06, -0.03, 'armor_lit')
         if inner:
-            inset(torso, inner, 0.05, -0.02, 'shadowed')
-    m.add(torso)
-    m.add(box((0, 0.94, 0.02), (0.28, 0.13, 0.20), 'dark', bevel_w=0.03))
+            inset(chest, inner, 0.05, -0.022, 'shadowed')
+    m.add(chest)
+    # Collar the head sinks into.
+    m.add(frustum((0, 1.60, -0.02), (0.30, 0.08, 0.22), top=(0.80, 0.80),
+                  mat='armor_dark', bevel_w=0.035))
 
-    # Pauldrons: a bevelled cap plus a rim, rather than a plain box.
-    pl = box((0.50, 1.56, 0), (0.15, 0.17, 0.23), 'team', bevel_w=0.06, bevel_seg=3)
-    m.add_mirrored(pl)
-    m.add_mirrored(box((0.50, 1.72, 0), (0.13, 0.03, 0.20), 'armor', bevel_w=0.02))
-    # Upper arms tucked under the pauldrons.
-    m.add_mirrored(box((0.46, 1.26, 0.04), (0.095, 0.20, 0.11), 'armor_dark', bevel_w=0.03))
-    m.add_mirrored(box((0.44, 1.02, 0.18), (0.085, 0.13, 0.10), 'armor_dark', bevel_w=0.028))
+    # Pauldrons. These are the silhouette: oversized, canted outward, and the
+    # one place the faction colour is guaranteed to be visible from any angle.
+    for side in (1, -1):
+        pl = frustum((0.46 * side, 1.56, -0.01), (0.20, 0.17, 0.24),
+                     top=(0.82, 0.80), shift=(0.05 * side, 0.0),
+                     mat='team', bevel_w=0.055, bevel_seg=2)
+        rot(pl, math.radians(-16 * side), 'Z', (0.30 * side, 1.52, 0))
+        m.add(pl)
+        m.add(box((0.52 * side, 1.40, -0.01), (0.14, 0.05, 0.21),
+                  'armor_dark', bevel_w=0.022))
+        # Arms hang inboard and slightly forward.
+        m.add(frustum((0.47 * side, 1.20, 0.05), (0.10, 0.16, 0.115),
+                      top=(0.9, 0.9), mat='armor_dark', bevel_w=0.028))
+        m.add(box((0.45 * side, 0.99, 0.16), (0.095, 0.115, 0.105),
+                  'armor', bevel_w=0.025))
 
-    # Backpack with vent slots and a power indicator.
-    pack = box((0, 1.36, -0.34), (0.26, 0.29, 0.13), 'dark', bevel_w=0.04)
-    back = face_facing(pack, 'z', -1)
-    if back:
-        inset(pack, back, 0.05, -0.035, 'shadowed')
+    # Backpack with two stacks rising above the shoulder line, which gives the
+    # top of the silhouette something other than a dome.
+    pack = frustum((0, 1.36, -0.32), (0.24, 0.26, 0.12), top=(0.86, 1.0),
+                   mat='armor_dark', bevel_w=0.04)
+    bf = face_plate(pack, 'z', -1)
+    if bf:
+        inset(pack, bf, 0.05, -0.03, 'shadowed')
     m.add(pack)
-    for i in (-1, 0, 1):
-        m.add(box((i * 0.13, 1.16, -0.47), (0.045, 0.06, 0.02), 'shadowed',
-                  bevel_w=0.012, bevel_seg=1))
-    m.add(box((0, 1.62, -0.45), (0.15, 0.045, 0.03), 'glow_warm', bevel_w=0.015, bevel_seg=1))
-    # Air tanks.
-    m.add_mirrored(cyl((0.17, 1.12, -0.40), 0.065, 0.065, 0.40, 8, 'steel', bevel_w=0.02))
+    for side in (1, -1):
+        st = tube((0.15 * side, 1.58, -0.34), 0.062, 0.040, 0.42, 8, 'dark',
+                  axis='y')
+        rot(st, math.radians(-13), 'X', (0.15 * side, 1.58, -0.34))
+        m.add(st)
+    m.add(box((0, 1.20, -0.45), (0.15, 0.04, 0.03), 'glow_warm',
+              bevel_w=0.012, bevel_seg=1))
 
-    # Neck, helmet and visor. The helmet is a squashed sphere rather than a
-    # round one, which reads far more like a helmet in silhouette.
-    m.add(cyl((0, 1.66, 0.01), 0.11, 0.10, 0.10, 8, 'dark', bevel_w=0.02))
-    # Helmet: a sphere squashed vertically and drawn out along Z, which is
-    # what separates a helmet from a ball in silhouette. The visor then has to
-    # sit *proud of* that stretched surface -- a box at the sphere's nominal
-    # radius disappears inside it, which is how the first version ended up
-    # with a visor that read as a small patch on the side of a bald head.
-    SQ = (1.04, 0.94, 1.18)
-    HR, HC = 0.26, (0.0, 1.90, 0.02)
-    helm = sphere(HC, HR, 14, 9, 'armor')
-    xform(helm, Matrix.Translation(-Vector(HC)))
-    xform(helm, Matrix.Diagonal(Vector(SQ + (1.0,))))
-    xform(helm, Matrix.Translation(Vector(HC)))
+    # Head: small, low, and mostly visor.
+    helm = frustum((0, 1.74, 0.02), (0.145, 0.115, 0.15), top=(0.80, 0.78),
+                   shift=(0.0, -0.01), mat='armor_dark', bevel_w=0.04)
     m.add(helm)
-    # Brow ridge above the visor.
-    m.add(box((0, 1.98, HC[2] + HR * SQ[2] * 0.80), (0.17, 0.035, 0.07),
-              'armor_dark', bevel_w=0.02))
-    # Visor, straddling the front surface so it reads as set into the shell.
-    m.add(box((0, 1.89, HC[2] + HR * SQ[2] * 0.93), (0.155, 0.062, 0.055),
-              'glow_cyan', bevel_w=0.022, bevel_seg=2))
-    # Jaw guard and rebreather under it.
-    m.add(box((0, 1.76, HC[2] + HR * SQ[2] * 0.62), (0.115, 0.065, 0.10),
-              'dark', bevel_w=0.025))
-    # Low crest fin rather than a spike on top.
-    m.add(box((0, 2.04, -0.05), (0.028, 0.055, 0.15), 'team', bevel_w=0.018))
+    m.add(box((0, 1.74, 0.16), (0.115, 0.055, 0.035), 'glow_cyan',
+              bevel_w=0.018, bevel_seg=1))
+    m.add(box((0, 1.88, -0.03), (0.10, 0.035, 0.12), 'team', bevel_w=0.02))
 
-    # Gauss rifle: receiver, magazine, grip, barrel with a stepped muzzle.
-    m.add(box((0.40, 1.20, 0.34), (0.085, 0.10, 0.34), 'dark', bevel_w=0.028))
-    m.add(box((0.40, 1.33, 0.30), (0.055, 0.045, 0.22), 'steel', bevel_w=0.02))
-    m.add(box((0.40, 1.01, 0.22), (0.055, 0.11, 0.07), 'dark', bevel_w=0.025))
-    m.add(box((0.40, 1.04, 0.50), (0.06, 0.09, 0.05), 'armor_dark', bevel_w=0.02))
-    m.add(cyl((0.40, 1.24, 0.68), 0.05, 0.042, 0.36, 8, 'steel', axis='z', bevel_w=0.015))
-    m.add(cyl((0.40, 1.24, 1.04), 0.062, 0.062, 0.08, 8, 'dark', axis='z', bevel_w=0.015))
+    # Gauss rifle: chunky, with a drum magazine and a heavy muzzle.
+    m.add(box((0.30, 1.14, 0.30), (0.075, 0.095, 0.30), 'dark', bevel_w=0.025))
+    m.add(cyl((0.30, 1.06, 0.26), 0.115, 0.115, 0.12, 10, 'armor_dark',
+              axis='x', bevel_w=0.022))
+    m.add(box((0.30, 1.28, 0.24), (0.05, 0.05, 0.18), 'steel', bevel_w=0.018))
+    m.add(cyl((0.30, 1.17, 0.60), 0.046, 0.040, 0.30, 8, 'steel', axis='z',
+              bevel_w=0.014))
+    m.add(cyl((0.30, 1.17, 0.90), 0.070, 0.070, 0.10, 8, 'dark', axis='z',
+              bevel_w=0.016))
     return m
 
 
 # ---------------------------------------------------------------- mauler
-def build_mauler_hull():
-    m = Model(MESH_MAULER_HULL, 'MAULER_HULL')
-    track_unit(m, 1.32, 0.40, 5, 1.95, 0.42, 0.68)
 
-    # Lower hull, with a recessed sponson strip along each flank.
-    low = box((0, 0.72, 0), (1.20, 0.30, 1.85), 'armor_dark', bevel_w=0.07)
-    panel(low, 'x', 1, 0.14, -0.05, 'shadowed')
-    panel(low, 'x', -1, 0.14, -0.05, 'shadowed')
+def build_mauler_hull():
+    """Mauler hull: an arrow, not a brick.
+
+    The prow comes to a vertical centre edge and the hull widens toward the
+    deck, so the shape has a front and a direction even in plan view. The
+    engine deck steps up at the rear with the stacks on it, which stops the
+    roofline being one flat rectangle -- the single biggest tell that a model
+    is a box.
+    """
+    m = Model(MESH_MAULER_HULL, 'MAULER_HULL')
+    track_unit(m, 1.30, 0.40, 5, 1.90, 0.50, 0.66)
+
+    # Flared track shrouds: narrow at the bottom, overhanging at the top.
+    for side in (1, -1):
+        sh = frustum((1.30 * side, 1.12, -0.10), (0.36, 0.20, 1.72),
+                     top=(1.30, 0.94), shift=(0.10 * side, 0.0),
+                     mat='armor_dark', bevel_w=0.05)
+        m.add(sh)
+
+    # Lower hull, tucked in between the tracks.
+    low = frustum((0, 0.66, 0), (1.02, 0.30, 1.76), top=(1.12, 1.0),
+                  mat='dark', bevel_w=0.06)
     m.add(low)
 
-    # Upper hull. The glacis is the face a tank is read by, so it gets a
-    # two-step inset: a wide deck panel and a driver's hatch inside it.
-    up = wedge((0, 1.14, -0.15), (1.15, 0.30, 1.70), 0.20, 0.12, 'armor', bevel_w=0.07)
-    deck = face_facing(up, 'y', 1)
+    # Upper hull, widening toward the deck.
+    up = frustum((0, 1.14, -0.18), (1.04, 0.24, 1.48), top=(1.06, 0.90),
+                 shift=(0.0, -0.06), mat='armor', bevel_w=0.06)
+    deck = face_plate(up, 'y', 1)
     if deck:
-        inner = inset(up, deck, 0.16, -0.035, 'armor')
+        inner = inset(up, deck, 0.16, -0.035, 'armor_lit')
         if inner:
-            inset(up, inner, 0.28, -0.04, 'shadowed')
+            inset(up, inner, 0.30, -0.045, 'shadowed')
     m.add(up)
 
-    # Glacis plate: a separate sloped slab across the nose.
-    gl = box((0, 1.05, 1.62), (1.08, 0.26, 0.20), 'armor', bevel_w=0.055)
-    rot(gl, math.radians(34), 'X', (0, 1.05, 1.62))
-    m.add(gl)
+    # The prow: two plates meeting at a centre edge, so the nose is a wedge in
+    # plan as well as in profile.
+    for side in (1, -1):
+        gl = frustum((0.50 * side, 1.00, 1.46), (0.56, 0.30, 0.34),
+                     top=(0.80, 0.55), shift=(-0.10 * side, -0.14),
+                     mat='armor_lit', bevel_w=0.05)
+        rot(gl, math.radians(30), 'X', (0.50 * side, 1.00, 1.46))
+        rot(gl, math.radians(-17 * side), 'Y', (0, 0, 1.70))
+        m.add(gl)
+    m.add(box((0, 0.74, 1.62), (0.26, 0.16, 0.22), 'dark', bevel_w=0.04))
+    # Dozer lugs on the nose.
+    for side in (1, -1):
+        m.add(box((0.72 * side, 0.70, 1.52), (0.09, 0.10, 0.14), 'steel',
+                  bevel_w=0.022))
 
-    # Team side skirts, slotted so they read as bolted-on plate.
-    for zc in (-0.95, -0.10, 0.75):
-        sk = box((1.19, 1.05, zc), (0.055, 0.19, 0.40), 'team', bevel_w=0.03)
-        m.add_mirrored(sk)
+    # Engine deck, stepped up at the rear.
+    eng = frustum((0, 1.50, -1.16), (0.86, 0.15, 0.60), top=(0.88, 0.84),
+                  mat='armor_dark', bevel_w=0.045)
+    m.add(eng)
+    for i in range(5):
+        m.add(box((0, 1.66, -1.52 + i * 0.18), (0.66, 0.035, 0.05),
+                  'shadowed', bevel_w=0.0))
+    for side in (1, -1):
+        st = tube((0.62 * side, 1.58, -0.58), 0.130, 0.086, 0.26, 8, 'dark',
+                  axis='y')
+        rot(st, math.radians(-16), 'X', (0.62 * side, 1.62, -0.58))
+        m.add(st)
 
-    # Fenders over the tracks, and stowage boxes on them.
-    m.add_mirrored(box((1.32, 1.34, 0.30), (0.46, 0.05, 1.55), 'armor_dark', bevel_w=0.03))
-    m.add_mirrored(box((1.32, 1.47, -1.05), (0.34, 0.11, 0.42), 'dark', bevel_w=0.035))
-    m.add_mirrored(box((1.32, 1.45, 0.95), (0.30, 0.09, 0.34), 'armor_dark', bevel_w=0.03))
+    # Team skirts, angled with the shroud so the colour sits on the
+    # silhouette edge rather than flat on a side panel.
+    for side in (1, -1):
+        for zc in (-1.02, -0.12, 0.78):
+            sk = frustum((1.56 * side, 1.06, zc), (0.05, 0.22, 0.40),
+                         top=(1.0, 0.88), shift=(0.07 * side, 0.0),
+                         mat='team', bevel_w=0.028)
+            m.add(sk)
 
-    # Exhaust over the engine deck at the rear. Kept below the hull roof:
-    # MeshRange.height is the max Y of the mesh and positions the health bar
-    # and the build-in dissolve cutoff, so a stack poking above the hull
-    # visibly lifts both.
-    m.add_mirrored(tube((0.62, 1.20, -1.52), 0.12, 0.08, 0.22, 8, 'dark', axis='y'))
-    # Engine deck louvres.
-    for i in range(4):
-        m.add(box((0, 1.44, -1.05 + i * 0.17), (0.72, 0.035, 0.05), 'shadowed',
-                  bevel_w=0.012, bevel_seg=1))
-
-    # Headlights with guards.
-    m.add_mirrored(cyl((0.85, 1.30, 1.54), 0.11, 0.11, 0.05, 10, 'dark', axis='z', bevel_w=0.02))
-    m.add_mirrored(cyl((0.85, 1.30, 1.58), 0.085, 0.085, 0.03, 10, 'glow_dim', axis='z', bevel_w=0.01))
-    # Tow hooks.
-    m.add_mirrored(box((0.55, 0.62, 1.86), (0.07, 0.07, 0.10), 'steel', bevel_w=0.02))
+    # Stowage and lights, asymmetric on purpose.
+    m.add(box((1.34, 1.42, -1.30), (0.30, 0.13, 0.40), 'rust', bevel_w=0.035))
+    m.add(box((-1.34, 1.40, 0.90), (0.26, 0.11, 0.32), 'armor_dark', bevel_w=0.03))
+    for side in (1, -1):
+        m.add(cyl((0.78 * side, 1.26, 1.30), 0.10, 0.10, 0.06, 10, 'dark',
+                  axis='z', bevel_w=0.018))
+        m.add(cyl((0.78 * side, 1.26, 1.35), 0.078, 0.078, 0.03, 10,
+                  'glow_dim', axis='z', bevel_w=0.0))
     return m
 
 
+
 def build_mauler_turret():
+    """Mauler turret: a faceted wedge with an overhanging bustle.
+
+    Narrow and sloped at the front, wide and square at the back, with the
+    ammunition bustle cantilevered off the rear. That asymmetry is what makes
+    a turret readable as pointing somewhere, which matters because this mesh
+    is drawn rotating independently of the hull.
+    """
     m = Model(MESH_MAULER_TURRET, 'MAULER_TURRET')
 
-    # Turret shell with a sloped roof and a recessed roof panel.
-    sh = wedge((0, 0.30, -0.15), (0.82, 0.30, 0.95), 0.25, 0.20, 'armor', bevel_w=0.065)
-    roof = face_facing(sh, 'y', 1)
+    # Shell: wide at the base, narrowing and sloping up, and tapered toward
+    # the muzzle end so the whole turret is a wedge in plan.
+    shell = frustum((0, 0.30, -0.20), (0.86, 0.30, 0.92), top=(0.66, 0.74),
+                    shift=(0.0, -0.10), mat='armor', bevel_w=0.06)
+    roof = face_plate(shell, 'y', 1)
     if roof:
-        inset(sh, roof, 0.13, -0.03, 'armor')
-    m.add(sh)
-    # Cheek armour, angled, which is what gives a turret its faceted read.
-    for s in (1, -1):
-        ck = box((0.62 * s, 0.30, 0.52), (0.22, 0.25, 0.34), 'armor', bevel_w=0.05)
-        rot(ck, math.radians(-22 * s), 'Y', (0, 0.30, 0.52))
+        inset(shell, roof, 0.13, -0.03, 'armor_lit')
+    m.add(shell)
+
+    # Cheeks: angled plates each side of the mantlet, the classic faceted read.
+    for side in (1, -1):
+        ck = frustum((0.50 * side, 0.30, 0.52), (0.30, 0.27, 0.40),
+                     top=(0.70, 0.80), shift=(-0.06 * side, -0.04),
+                     mat='armor_lit', bevel_w=0.05)
+        rot(ck, math.radians(-26 * side), 'Y', (0, 0.30, 0.20))
         m.add(ck)
 
-    # Mantlet: rounded, so the barrel appears to pivot in it.
-    m.add(cyl((0, 0.30, 0.72), 0.30, 0.30, 0.22, 12, 'armor_dark', axis='z', bevel_w=0.05))
-    m.add(box((0, 0.30, 0.80), (0.34, 0.24, 0.16), 'armor_dark', bevel_w=0.05))
+    # Overhanging rear bustle.
+    bus = frustum((0, 0.40, -1.02), (0.74, 0.24, 0.34), top=(0.92, 1.12),
+                  shift=(0.0, -0.08), mat='armor_dark', bevel_w=0.05)
+    m.add(bus)
+    for i in range(4):
+        m.add(box((-0.48 + i * 0.32, 0.40, -1.34), (0.11, 0.16, 0.04),
+                  'shadowed', bevel_w=0.0))
+    m.add(box((0, 0.66, -1.02), (0.60, 0.04, 0.26), 'team', bevel_w=0.022))
 
-    # 120mm barrel: a stepped tube, thicker at the breech, with a fume
-    # extractor bulge. A single tapered cylinder reads as a stick.
-    m.add(cyl((0, 0.30, 0.88), 0.145, 0.125, 0.55, 12, 'steel', axis='z', bevel_w=0.02))
-    m.add(cyl((0, 0.30, 1.43), 0.165, 0.165, 0.30, 12, 'armor_dark', axis='z', bevel_w=0.035))
-    m.add(cyl((0, 0.30, 1.73), 0.115, 0.098, 0.92, 12, 'steel', axis='z', bevel_w=0.02))
-    # Muzzle brake with side ports.
-    m.add(cyl((0, 0.30, 2.65), 0.185, 0.185, 0.26, 12, 'dark', axis='z', bevel_w=0.03))
-    for s in (1, -1):
-        m.add(box((0.17 * s, 0.30, 2.72), (0.05, 0.075, 0.07), 'shadowed',
-                  bevel_w=0.015, bevel_seg=1))
+    # Mantlet and barrel. The barrel is stepped and ends in a big slotted
+    # brake, because a plain tapered tube reads as a stick.
+    m.add(cyl((0, 0.30, 0.66), 0.31, 0.31, 0.24, 12, 'armor_dark', axis='z',
+              bevel_w=0.05))
+    m.add(box((0, 0.30, 0.76), (0.36, 0.25, 0.16), 'armor_dark', bevel_w=0.05))
+    m.add(cyl((0, 0.30, 0.86), 0.150, 0.128, 0.56, 12, 'steel', axis='z',
+              bevel_w=0.02))
+    m.add(cyl((0, 0.30, 1.42), 0.172, 0.172, 0.30, 12, 'armor_dark', axis='z',
+              bevel_w=0.035))
+    m.add(cyl((0, 0.30, 1.72), 0.116, 0.099, 0.90, 12, 'steel', axis='z',
+              bevel_w=0.02))
+    m.add(cyl((0, 0.30, 2.62), 0.196, 0.196, 0.28, 12, 'dark', axis='z',
+              bevel_w=0.03))
+    for side in (1, -1):
+        for k in range(2):
+            m.add(box((0.18 * side, 0.30, 2.66 + k * 0.13),
+                      (0.055, 0.080, 0.042), 'shadowed', bevel_w=0.0))
 
-    # Team recognition band, commander's cupola with a rim and periscopes.
-    m.add(box((0, 0.58, -0.50), (0.68, 0.055, 0.28), 'team', bevel_w=0.025))
-    m.add(cyl((0.32, 0.58, -0.28), 0.23, 0.22, 0.13, 10, 'armor_dark', bevel_w=0.03))
-    m.add(cyl((0.32, 0.71, -0.28), 0.19, 0.19, 0.04, 10, 'dark', bevel_w=0.015))
+    # Offset cupola with periscope blocks, and a coaxial mount.
+    m.add(cyl((0.34, 0.60, -0.30), 0.24, 0.215, 0.14, 10, 'armor_dark',
+              bevel_w=0.03))
+    m.add(cyl((0.34, 0.74, -0.30), 0.19, 0.19, 0.035, 10, 'dark', bevel_w=0.014))
     for k in range(3):
-        a = math.radians(-40 + k * 40)
-        m.add(box((0.32 + math.sin(a) * 0.20, 0.68, -0.28 + math.cos(a) * 0.20),
-                  (0.035, 0.03, 0.02), 'glow_cyan', bevel_w=0.008, bevel_seg=1))
-
-    # Coaxial mount and smoke launchers -- small, but they break the roofline.
-    m.add(box((-0.34, 0.36, 0.78), (0.06, 0.06, 0.22), 'dark', bevel_w=0.02))
-    for s in (1, -1):
-        m.add(box((s * 0.58, 0.50, -0.46), (0.07, 0.10, 0.24), 'dark', bevel_w=0.02))
+        a = math.radians(-46 + k * 46)
+        m.add(box((0.34 + math.sin(a) * 0.20, 0.70, -0.30 + math.cos(a) * 0.20),
+                  (0.04, 0.032, 0.025), 'glow_cyan', bevel_w=0.0))
+    m.add(box((-0.40, 0.40, 0.74), (0.065, 0.065, 0.24), 'dark', bevel_w=0.02))
+    # Smoke launcher banks on the cheeks.
+    for side in (1, -1):
+        m.add(box((0.62 * side, 0.54, 0.10), (0.075, 0.105, 0.24), 'dark',
+                  bevel_w=0.02))
         for k in range(3):
-            m.add(box((s * 0.58, 0.61, -0.64 + k * 0.17), (0.05, 0.02, 0.05),
-                      'shadowed', bevel_w=0.0))
+            m.add(box((0.62 * side, 0.66, -0.06 + k * 0.16),
+                      (0.052, 0.022, 0.052), 'shadowed', bevel_w=0.0))
     return m
 
 
 # ---------------------------------------------------------------- buildings
+
 def build_foundry():
+    """Foundry: a stepped tower, not a dome.
+
+    The version this replaces was a drum with a cone on top, which from the
+    game's camera reads as a dome -- a silhouette with no direction, no scale
+    cue and nothing to distinguish it from the supply depot. This steps in
+    three stages from a buttressed base to a narrow control head, hangs a
+    cantilevered landing ring off the middle, and runs ducting up one side so
+    the outline is not rotationally symmetric.
+    """
     m = Model(MESH_FOUNDRY, 'FOUNDRY')
 
-    base = cyl((0, 0, 0), 4.6, 4.3, 1.10, 8, 'armor_dark', bevel_w=0.10, bevel_seg=2)
-    m.add(base)
-    # Buttresses around the foundation.
+    # Stage one: a low battered plinth with heavy angled buttresses.
+    m.add(cyl((0, 0, 0), 4.30, 4.05, 0.80, 8, 'armor_dark', bevel_w=0.09))
     for i in range(8):
         a = face_angle(i, 8)
-        bt = box((math.cos(a) * 4.05, 0.55, math.sin(a) * 4.05), (0.28, 0.55, 0.45),
-                 'armor_dark', bevel_w=0.06)
+        bt = frustum((math.cos(a) * 3.95, 0.62, math.sin(a) * 3.95),
+                     (0.34, 0.62, 0.52), top=(0.55, 0.62), shift=(0.0, -0.20),
+                     mat='armor_dark', bevel_w=0.055)
         orient_radial(bt, a)
         m.add(bt)
+    m.add(cyl((0, 0.80, 0), 3.95, 3.80, 0.34, 8, 'dark', bevel_w=0.05))
 
-    drum = cyl((0, 1.10, 0), 3.7, 3.5, 2.40, 8, 'armor', bevel_w=0.09, bevel_seg=2)
-    m.add(drum)
-    # Vertical ribs: eight plates standing proud of the drum wall. On a smooth
-    # cylinder at this size the lighting has nothing to break up, and the
-    # building reads as a barrel.
+    # Stage two: the main drum, tapering hard so the eye reads height.
+    m.add(cyl((0, 1.14, 0), 3.40, 2.75, 1.80, 8, 'armor', bevel_w=0.08))
     for i in range(8):
         a = face_angle(i, 8)
-        # Seat each rib on the drum's surface at its own height so it stands
-        # proud of the taper rather than sinking into it.
-        rr = cone_radius_at(3.7, 3.5, 2.40, 2.30 - 1.10) + 0.12
-        rb = box((math.cos(a) * rr, 2.30, math.sin(a) * rr), (0.16, 1.12, 0.26),
-                 'armor_dark', bevel_w=0.045)
+        rr = cone_radius_at(3.40, 2.75, 1.80, 0.90) + 0.14
+        rb = frustum((math.cos(a) * rr, 2.04, math.sin(a) * rr),
+                     (0.19, 0.90, 0.30), top=(0.70, 0.72),
+                     mat='armor_dark', bevel_w=0.04)
         orient_radial(rb, a)
         m.add(rb)
+    band_r = cone_radius_at(3.40, 2.75, 1.80, 0.34) + 0.05
+    m.add(cyl((0, 1.48, 0), band_r, band_r, 0.40, 8, 'glow_warm', caps=False,
+              bevel_w=0.0))
 
-    # Window band, sized from the drum's own taper at this height plus a
-    # small proud offset. Hardcoding 3.57 here put the band 5 cm inside a
-    # drum that is 3.62 wide at y=2.05, and it rendered nothing at all.
-    band_r = cone_radius_at(3.7, 3.5, 2.40, 2.05 - 1.10) + 0.04
-    m.add(cyl((0, 2.05, 0), band_r, band_r, 0.42, 8, 'glow_warm', caps=False, bevel_w=0.0))
-    m.add(cyl((0, 3.50, 0), 3.5, 2.5, 1.00, 8, 'armor', bevel_w=0.08, bevel_seg=2))
-
-    m.add(ring_flat((0, 4.50, 0), 1.65, 2.45, 24, 'team', thickness=0.10))
-    tower = cyl((0, 4.50, 0), 1.6, 1.4, 0.55, 8, 'armor_dark', bevel_w=0.06)
-    m.add(tower)
-    glz_r = cone_radius_at(1.6, 1.4, 0.55, 4.72 - 4.50) + 0.04
-    m.add(cyl((0, 4.72, 0), glz_r, glz_r, 0.26, 8, 'glow_cyan', caps=False, bevel_w=0.0))
-    m.add(cyl((0, 4.90, 0), 1.35, 1.15, 0.15, 8, 'armor_dark', bevel_w=0.04))
-
-    # Corner pylons, capped and lit.
+    # Cantilevered landing ring: the one horizontal in an otherwise vertical
+    # shape, which is what gives the tower its scale.
+    m.add(ring_flat((0, 2.94, 0), 2.08, 3.02, 24, 'team', thickness=0.22))
+    for i in range(8):
+        a = face_angle(i, 8)
+        br = frustum((math.cos(a) * 2.66, 2.70, math.sin(a) * 2.66),
+                     (0.16, 0.22, 0.52), top=(1.0, 0.45), shift=(0.0, 0.22),
+                     mat='steel', bevel_w=0.03)
+        orient_radial(br, a)
+        m.add(br)
     for i in range(4):
-        a = math.pi * 0.25 + i * math.pi * 0.5
-        px, pz = math.cos(a) * 4.15, math.sin(a) * 4.15
-        py = box((px, 1.5, pz), (0.26, 1.5, 0.26), 'steel', bevel_w=0.045)
-        rot(py, -a, 'Y', (0, 0, 0))
-        m.add(py)
-        m.add(box((px, 3.05, pz), (0.32, 0.10, 0.32), 'armor_dark', bevel_w=0.035))
-        m.add(box((px, 3.20, pz), (0.15, 0.09, 0.15), 'glow_dim', bevel_w=0.02, bevel_seg=1))
+        a = face_angle(i * 2, 8)
+        m.add(box((math.cos(a) * 2.80, 3.22, math.sin(a) * 2.80),
+                  (0.12, 0.10, 0.12), 'glow_dim', bevel_w=0.02))
 
-    # Intake pipes running up the drum -- the greeble that says "industry".
-    for i in (2, 6):
-        a = face_angle(i, 8) + math.pi / 8
-        pr = cone_radius_at(3.7, 3.5, 2.40, 1.10) + 0.10
-        px, pz = math.cos(a) * pr, math.sin(a) * pr
-        m.add(cyl((px, 1.20, pz), 0.20, 0.20, 2.10, 8, 'steel', bevel_w=0.03))
-        m.add(cyl((px, 3.30, pz), 0.26, 0.20, 0.22, 8, 'dark', bevel_w=0.03))
+    # Stage three: the control head, narrow and glazed.
+    m.add(cyl((0, 3.16, 0), 1.86, 1.30, 1.34, 8, 'armor', bevel_w=0.06))
+    gl_r = cone_radius_at(1.86, 1.30, 1.34, 0.96) + 0.05
+    m.add(cyl((0, 4.12, 0), gl_r, gl_r, 0.30, 8, 'glow_cyan', caps=False,
+              bevel_w=0.0))
+    m.add(cyl((0, 4.50, 0), 1.42, 0.98, 0.30, 8, 'armor_dark', bevel_w=0.05))
+    m.add(cyl((0, 4.80, 0), 0.86, 0.70, 0.14, 8, 'dark', bevel_w=0.03))
+
+    # Ducting up one flank, and a mast: both break the rotational symmetry.
+    duct_a = face_angle(2, 8)
+    dx, dz = math.cos(duct_a), math.sin(duct_a)
+    for (yb, hh, rr2) in ((1.10, 2.00, 0.26), (3.10, 1.05, 0.20)):
+        pr = cone_radius_at(3.40, 2.75, 1.80, min(yb - 1.14, 1.80)) + 0.26
+        m.add(cyl((dx * pr, yb, dz * pr), rr2, rr2, hh, 8, 'steel', bevel_w=0.03))
+    m.add(cyl((dx * 3.40, 3.16, dz * 3.40), 0.34, 0.24, 0.30, 8, 'dark',
+              bevel_w=0.04))
+    m.add(cyl((-dx * 1.30, 4.70, -dz * 1.30), 0.075, 0.045, 0.34, 6, 'steel',
+              bevel_w=0.0))
+    m.add(box((-dx * 1.30, 5.00, -dz * 1.30), (0.075, 0.05, 0.075),
+              'glow_warm', bevel_w=0.0))
     return m
+
 
 
 def build_garrison():
+    """Garrison: a fortress with an asymmetric watchtower.
+
+    Battered walls -- wider at the base than the top -- read as fortification
+    rather than as a shed, and the tower on one corner gives the building an
+    orientation. A symmetrical box with a stripe on the roof does not.
+    """
     m = Model(MESH_GARRISON, 'GARRISON')
 
-    slab = box((0, 0.30, 0), (3.20, 0.30, 3.70), 'armor_dark', bevel_w=0.08)
-    m.add(slab)
-    main = wedge((0, 1.70, -0.2), (2.80, 1.10, 3.30), 0.18, 0.14, 'armor', bevel_w=0.09,
-                 bevel_seg=2)
-    # Recess the long flanks into wall panels.
-    panel(main, 'x', 1, 0.30, -0.07, 'shadowed')
-    panel(main, 'x', -1, 0.30, -0.07, 'shadowed')
+    m.add(box((0, 0.26, 0), (3.20, 0.26, 3.70), 'dark', bevel_w=0.07))
+    m.add(frustum((0, 0.62, 0), (3.02, 0.36, 3.52), top=(0.95, 0.96),
+                  mat='armor_dark', bevel_w=0.06))
+
+    # Main block, battered.
+    main = frustum((0, 1.72, -0.16), (2.78, 1.10, 3.24), top=(0.80, 0.88),
+                   shift=(0.0, 0.06), mat='armor', bevel_w=0.08)
+    panel(main, 'x', 1, 0.34, -0.08, 'shadowed')
+    panel(main, 'x', -1, 0.34, -0.08, 'shadowed')
     m.add(main)
 
-    # Buttress ribs down each side.
-    for zc in (-2.3, -0.9, 0.5, 1.9):
-        rb = box((2.72, 1.55, zc), (0.20, 1.20, 0.26), 'armor_dark', bevel_w=0.04)
-        m.add_mirrored(rb)
+    # Buttress ribs, leaning with the wall.
+    for side in (1, -1):
+        for zc in (-2.30, -0.90, 0.50, 1.86):
+            rb = frustum((2.72 * side, 1.66, zc), (0.26, 1.16, 0.30),
+                         top=(0.62, 0.86), shift=(-0.16 * side, 0.0),
+                         mat='armor_dark', bevel_w=0.04)
+            m.add(rb)
 
-    roof = box((0, 3.05, -0.9), (1.90, 0.35, 1.70), 'armor_dark', bevel_w=0.06)
-    rf = face_facing(roof, 'y', 1)
-    if rf:
-        inset(roof, rf, 0.22, -0.06, 'shadowed')
-    m.add(roof)
-    # Roof vents.
-    for s in (1, -1):
-        m.add(box((s * 1.05, 3.48, -0.9), (0.45, 0.10, 1.20), 'steel', bevel_w=0.03))
+    # Angled roof plates meeting at a ridge, rather than a flat lid.
+    for side in (1, -1):
+        rp = frustum((1.05 * side, 2.94, -0.10), (1.18, 0.14, 3.00),
+                     top=(0.92, 0.94), mat='armor_lit', bevel_w=0.05)
+        rot(rp, math.radians(-9 * side), 'Z', (0, 2.88, 0))
+        m.add(rp)
+    m.add(box((0, 3.10, -0.10), (0.34, 0.11, 3.02), 'team', bevel_w=0.04))
 
-    # Bay door, set into a recessed frame with a lit surround.
-    frame = box((0, 1.25, 3.05), (1.52, 1.12, 0.22), 'armor_dark', bevel_w=0.05)
-    df = face_facing(frame, 'z', 1)
+    # Watchtower on one corner. This is the silhouette.
+    tx, tz = -1.90, -2.42
+    m.add(frustum((tx, 2.30, tz), (0.98, 2.30, 0.98), top=(0.82, 0.82),
+                  mat='armor', bevel_w=0.06))
+    m.add(frustum((tx, 4.72, tz), (0.92, 0.22, 0.92), top=(1.18, 1.18),
+                  mat='armor_dark', bevel_w=0.05))
+    m.add(box((tx, 4.44, tz + 0.84), (0.60, 0.22, 0.05), 'glow_amber',
+              bevel_w=0.02))
+    m.add(box((tx + 0.84, 4.44, tz), (0.05, 0.22, 0.60), 'glow_amber',
+              bevel_w=0.02))
+    m.add(frustum((tx, 5.04, tz), (0.72, 0.13, 0.72), top=(0.55, 0.55),
+                  mat='team', bevel_w=0.04))
+    # Vertical team banner down the tower face, on the silhouette edge.
+    m.add(box((tx + 0.96, 2.60, tz), (0.05, 1.30, 0.42), 'team', bevel_w=0.025))
+
+    # Armoured bay door in a heavy angled frame.
+    frame = frustum((0, 1.32, 3.06), (1.66, 1.20, 0.24), top=(0.86, 1.0),
+                    mat='armor_dark', bevel_w=0.055)
+    df = face_plate(frame, 'z', 1)
     if df:
-        inset(frame, df, 0.14, -0.10, 'dark')
+        inset(frame, df, 0.16, -0.12, 'dark')
     m.add(frame)
-    m.add(box((0, 1.22, 3.20), (1.22, 0.88, 0.06), 'glow_amber', bevel_w=0.02, bevel_seg=1))
-    # Door rails.
-    for s in (1, -1):
-        m.add(box((s * 1.44, 1.25, 3.22), (0.08, 1.10, 0.08), 'steel', bevel_w=0.02))
+    m.add(box((0, 1.24, 3.22), (1.24, 0.90, 0.05), 'glow_amber', bevel_w=0.02))
+    for side in (1, -1):
+        m.add(frustum((1.58 * side, 1.34, 3.20), (0.13, 1.20, 0.13),
+                      top=(0.7, 0.7), mat='steel', bevel_w=0.025))
+    # Blast deflectors flanking the door.
+    for side in (1, -1):
+        bd = frustum((2.26 * side, 0.72, 3.30), (0.30, 0.72, 0.60),
+                     top=(0.45, 0.70), mat='armor_dark', bevel_w=0.045)
+        rot(bd, math.radians(11 * side), 'Z', (2.26 * side, 0.0, 3.30))
+        m.add(bd)
 
-    m.add(box((0, 2.72, 0.6), (2.74, 0.17, 2.50), 'team', bevel_w=0.04))
-
-    # Antennae with dishes.
-    for s, h in ((-1, 1.7), (1, 1.4)):
-        m.add(cyl((s * 2.3, 3.40, -2.60), 0.085, 0.05, h, 8, 'steel', bevel_w=0.02))
-        m.add(box((s * 2.3, 3.40 + h, -2.60), (0.075, 0.075, 0.075), 'glow_warm',
-                  bevel_w=0.02, bevel_seg=1))
-    m.add(cyl((2.3, 3.55, -2.60), 0.42, 0.42, 0.07, 12, 'armor_dark', bevel_w=0.03))
+    m.add(cyl((2.40, 2.96, -2.60), 0.09, 0.05, 1.70, 8, 'steel', bevel_w=0.0))
+    m.add(box((2.40, 4.70, -2.60), (0.07, 0.05, 0.07), 'glow_warm', bevel_w=0.0))
     return m
+
 
 
 def build_workshop():
+    """Workshop: a hangar under a gantry crane.
+
+    The arch alone was the most readable of the old buildings, so it stays.
+    What it lacked was anything above the roofline: a straddle crane on rails
+    gives the building a tall open structure that is unmistakable from above
+    and still reads in silhouette from the side, which no amount of surface
+    panelling on a shed will do.
+    """
     m = Model(MESH_WORKSHOP, 'WORKSHOP')
 
-    m.add(box((0, 0.32, 0), (3.70, 0.32, 4.20), 'armor_dark', bevel_w=0.08))
+    m.add(box((0, 0.26, 0), (3.70, 0.26, 4.20), 'dark', bevel_w=0.07))
+    m.add(frustum((0, 0.60, 0), (3.52, 0.34, 4.02), top=(0.96, 0.97),
+                  mat='armor_dark', bevel_w=0.055))
 
-    # Arched hangar: a cylinder on its side. Bevelling its rim would round the
-    # arch away, so it is left sharp and the ribs below provide the relief.
-    arch = cyl((0, 1.15, -3.6), 2.55, 2.55, 7.2, 14, 'armor', axis='z', bevel_w=0.0)
-    m.add(arch)
-    # Structural ribs banding the arch.
-    for zc in (-2.6, -0.9, 0.8, 2.5):
-        rb = tube((0, 1.15, zc), 2.66, 2.50, 0.26, 14, 'armor_dark', axis='z')
-        m.add(rb)
+    # Arched hangar. Its rim is left unbevelled so the arch keeps its curve.
+    m.add(cyl((0, 0.94, -3.42), 2.46, 2.46, 6.90, 14, 'armor', axis='z',
+              bevel_w=0.0))
+    for zc in (-2.45, -0.85, 0.75, 2.35):
+        m.add(tube((0, 0.94, zc), 2.58, 2.42, 0.24, 14, 'armor_dark', axis='z'))
+    m.add(frustum((0, 1.10, -3.58), (2.52, 1.50, 0.20), top=(0.86, 1.0),
+                  mat='armor_dark', bevel_w=0.055))
+    m.add(box((0, 0.90, -3.76), (1.05, 1.00, 0.06), 'dark', bevel_w=0.02))
 
-    m.add(box((0, 1.15, -3.75), (2.60, 1.45, 0.22), 'armor_dark', bevel_w=0.06))
-    # Rear service door.
-    m.add(box((0, 0.95, -3.92), (1.10, 1.05, 0.06), 'dark', bevel_w=0.02))
-
-    # Hangar mouth: recessed frame plus the lit opening.
-    mouth = box((0, 1.20, 3.70), (2.34, 1.58, 0.20), 'armor_dark', bevel_w=0.06)
-    mf = face_facing(mouth, 'z', 1)
+    # Hangar mouth: heavy angled frame with the lit opening set into it.
+    mouth = frustum((0, 1.16, 3.56), (2.34, 1.56, 0.22), top=(0.88, 1.0),
+                    mat='armor_dark', bevel_w=0.06)
+    mf = face_plate(mouth, 'z', 1)
     if mf:
         inset(mouth, mf, 0.22, -0.12, 'dark')
     m.add(mouth)
-    m.add(box((0, 1.05, 3.84), (1.85, 1.22, 0.05), 'glow_amber', bevel_w=0.02, bevel_seg=1))
-    # Approach lights on the apron.
-    for s in (1, -1):
-        m.add(box((s * 2.10, 0.70, 4.05), (0.12, 0.12, 0.10), 'glow_dim',
-                  bevel_w=0.02, bevel_seg=1))
+    m.add(box((0, 1.00, 3.72), (1.82, 1.20, 0.05), 'glow_amber', bevel_w=0.02))
+    for side in (1, -1):
+        m.add(frustum((2.20 * side, 1.20, 3.68), (0.20, 1.50, 0.20),
+                      top=(0.6, 0.6), mat='steel', bevel_w=0.03))
 
-    m.add(box((0, 3.62, -0.4), (1.30, 0.15, 3.00), 'team', bevel_w=0.04))
-    # Gantry crane rail down the roof line.
-    m.add(box((0, 3.80, -0.4), (0.22, 0.10, 2.80), 'steel', bevel_w=0.025))
+    # Gantry crane straddling the hangar, offset down the pad so the shape is
+    # not mirror-symmetric front to back.
+    gz = -0.60
+    for side in (1, -1):
+        leg = frustum((3.16 * side, 1.92, gz), (0.34, 1.92, 0.30),
+                      top=(0.52, 0.70), shift=(-0.22 * side, 0.0),
+                      mat='steel', bevel_w=0.04)
+        m.add(leg)
+        m.add(box((3.16 * side, 0.98, gz), (0.44, 0.13, 0.46), 'dark',
+                  bevel_w=0.03))
+        # Diagonal brace.
+        br = box((2.30 * side, 2.30, gz), (0.78, 0.07, 0.10), 'steel',
+                 bevel_w=0.02)
+        rot(br, math.radians(26 * side), 'Z', (2.94 * side, 2.30, gz))
+        m.add(br)
+    m.add(box((0, 3.90, gz), (3.10, 0.17, 0.26), 'armor_dark', bevel_w=0.04))
+    m.add(box((0, 4.06, gz), (3.16, 0.09, 0.34), 'team', bevel_w=0.03))
+    # Trolley and hook hanging off the beam, deliberately off-centre.
+    m.add(box((-1.15, 3.62, gz), (0.36, 0.16, 0.32), 'armor_dark', bevel_w=0.03))
+    m.add(cyl((-1.15, 2.90, gz), 0.035, 0.035, 0.72, 6, 'dark', bevel_w=0.0))
+    m.add(box((-1.15, 2.78, gz), (0.13, 0.13, 0.13), 'steel', bevel_w=0.02))
+    for side in (1, -1):
+        m.add(box((3.16 * side, 4.02, gz), (0.11, 0.09, 0.11), 'glow_dim',
+                  bevel_w=0.0))
 
-    # Exhaust stacks with caps.
-    for s in (1, -1):
-        m.add(cyl((s * 2.55, 1.60, -2.50), 0.42, 0.36, 2.50, 12, 'steel', bevel_w=0.04))
-        m.add(tube((s * 2.55, 4.02, -2.50), 0.40, 0.29, 0.20, 12, 'dark', axis='y'))
-        m.add(box((s * 2.55, 2.30, -2.50), (0.50, 0.09, 0.50), 'armor_dark', bevel_w=0.03))
+    # Exhaust stacks, canted outward.
+    for side in (1, -1):
+        st = frustum((2.92 * side, 1.70, -2.80), (0.34, 1.10, 0.34),
+                     top=(0.74, 0.74), shift=(0.16 * side, 0.0),
+                     mat='steel', bevel_w=0.04)
+        m.add(st)
+        m.add(tube((3.08 * side, 2.80, -2.80), 0.30, 0.21, 0.22, 10, 'dark',
+                   axis='y'))
+    # Apron markings.
+    for side in (1, -1):
+        m.add(box((1.50 * side, 0.54, 3.30), (0.16, 0.03, 0.70), 'glow_dim',
+                  bevel_w=0.0))
     return m
 
 
+
 def build_bunkhouse():
+    """Bunkhouse: a supply silo with radiator fins.
+
+    Squat and round is the hardest silhouette to make distinct, so the fins do
+    the work: six plates standing well proud of the drum give the outline
+    teeth in plan view, which is the view that matters for a building this
+    low, and separate it at a glance from the foundry's round base.
+    """
     m = Model(MESH_BUNKHOUSE, 'BUNKHOUSE')
 
-    m.add(cyl((0, 0, 0), 2.35, 2.20, 0.45, 8, 'armor_dark', bevel_w=0.07, bevel_seg=2))
-    body = cyl((0, 0.45, 0), 2.05, 1.75, 0.95, 8, 'armor', bevel_w=0.07, bevel_seg=2)
+    m.add(cyl((0, 0, 0), 2.00, 1.90, 0.34, 6, 'dark', bevel_w=0.05))
+    body = cyl((0, 0.34, 0), 1.76, 1.44, 0.92, 6, 'armor', bevel_w=0.06)
     m.add(body)
 
-    # Wall panels between the vents.
-    for i in range(8):
-        a = face_angle(i, 8)
-        pr = cone_radius_at(2.05, 1.75, 0.95, 0.45) + 0.04
-        pl = box((math.cos(a) * pr, 0.90, math.sin(a) * pr), (0.42, 0.30, 0.06),
-                 'armor_dark', bevel_w=0.03)
-        orient_radial(pl, a)
-        m.add(pl)
-
-    m.add(ring_flat((0, 1.40, 0), 1.05, 1.72, 16, 'team', thickness=0.09))
-    m.add(cyl((0, 1.38, 0), 1.02, 0.82, 0.30, 8, 'glow_cyan', bevel_w=0.03))
-    # Lit slit around the collar, proud of the body's taper at the rim.
-    slit_r = cone_radius_at(2.05, 1.75, 0.95, 0.86) + 0.03
-    m.add(cyl((0, 1.24, 0), slit_r, slit_r, 0.10, 8, 'glow_cyan', caps=False, bevel_w=0.0))
-    m.add(cyl((0, 1.66, 0), 0.80, 0.58, 0.06, 8, 'armor_dark', bevel_w=0.02))
-
-    # Vents, with a louvred face.
-    for i in range(4):
-        a = math.pi * 0.25 + i * math.pi * 0.5
-        vx, vz = math.cos(a) * 1.95, math.sin(a) * 1.95
-        vt = box((vx, 0.85, vz), (0.22, 0.42, 0.22), 'steel', bevel_w=0.035)
-        orient_radial(vt, a)
-        m.add(vt)
+    # Radiator fins, canted and reaching past the drum.
+    for i in range(6):
+        a = face_angle(i, 6)
+        fr = cone_radius_at(1.76, 1.44, 0.92, 0.42)
+        fin = frustum((math.cos(a) * (fr + 0.42), 0.78, math.sin(a) * (fr + 0.42)),
+                      (0.58, 0.60, 0.10), top=(0.72, 0.72), shift=(-0.10, 0.0),
+                      mat='armor_dark', bevel_w=0.035)
+        orient_radial(fin, a)
+        m.add(fin)
+        # Fin ribs, cheap and they catch the light along the outer edge.
         for k in (-1, 0, 1):
-            lv = box((vx * 1.10, 0.85 + k * 0.14, vz * 1.10), (0.17, 0.035, 0.05),
-                     'shadowed', bevel_w=0.01, bevel_seg=1)
-            orient_radial(lv, a)
-            m.add(lv)
+            rb = box((math.cos(a) * (fr + 0.58), 0.78 + k * 0.30,
+                      math.sin(a) * (fr + 0.58)), (0.42, 0.045, 0.055),
+                     'shadowed', bevel_w=0.0)
+            orient_radial(rb, a)
+            m.add(rb)
+        m.add(cyl((math.cos(a) * (fr + 0.05), 0.40, math.sin(a) * (fr + 0.05)),
+                  0.11, 0.09, 0.80, 6, 'steel', bevel_w=0.0))
+
+    # Lit collar and a stepped cap, so the top is not a flat lid.
+    slit_r = cone_radius_at(1.76, 1.44, 0.92, 0.84) + 0.03
+    m.add(cyl((0, 1.14, 0), slit_r, slit_r, 0.12, 6, 'glow_cyan', caps=False,
+              bevel_w=0.0))
+    m.add(ring_flat((0, 1.26, 0), 0.96, 1.54, 18, 'team', thickness=0.10))
+    m.add(cyl((0, 1.26, 0), 0.94, 0.78, 0.26, 6, 'armor_dark', bevel_w=0.04))
+    m.add(cyl((0, 1.52, 0), 0.62, 0.44, 0.12, 6, 'steel', bevel_w=0.025))
+    # Beacon.
+    m.add(cyl((0, 1.62, 0), 0.13, 0.13, 0.08, 8, 'dark', bevel_w=0.018))
+    m.add(box((0, 1.70, 0), (0.09, 0.05, 0.09), 'glow_warm', bevel_w=0.0))
+    return m
+
+
+def build_ore():
+    """Ore seam: a crystal spire, not a bush of cones.
+
+    These sit on the map for the whole match next to everything else, so
+    leaving them on the old palette made them the palest objects on screen
+    once the units were rebuilt. Shape matters too: one dominant shard with
+    smaller ones leaning off it reads far better at distance than six cones
+    of similar height fanned out evenly.
+    """
+    m = Model(MESH_ORE, 'ORE')
+
+    # Rock socket the crystals grow out of. Kept low and wide: a tall base
+    # swallows the shards, and the shards are the thing a player looks for.
+    m.add(blob((0, 0.02, 0), 0.76, 8, 5, 3, 0.66, 'rock'))
+    m.add(blob((0.48, -0.02, -0.32), 0.36, 6, 4, 11, 0.8, 'rock'))
+
+    # One tall shard, then a supporting cast at decreasing height. Each is a
+    # tapered prism rather than a cone, so the facets catch light separately.
+    shards = [(0.00, 0.02, 1.86, 0.40, 0.05, 0.08),
+              (-0.44, -0.20, 1.30, 0.32, 0.22, -0.14),
+              (0.40, 0.30, 1.14, 0.29, -0.20, 0.13),
+              (0.14, -0.48, 0.86, 0.25, -0.12, -0.26),
+              (-0.30, 0.42, 0.72, 0.22, 0.24, 0.14),
+              (0.54, -0.12, 0.58, 0.19, -0.28, 0.06)]
+    for (sx, sz, h, r, lz, lx) in shards:
+        # Six-sided and only lightly tapered: a thin spike reads as an
+        # antenna, a chunky prism reads as a crystal. The taper is carried by
+        # a second, shorter section so the tip still comes to a point.
+        body = cyl((sx, 0.04, sz), r, r * 0.74, h * 0.66, 6, 'crystal',
+                   bevel_w=0.0)
+        tip = cyl((sx, 0.04 + h * 0.66, sz), r * 0.74, r * 0.10, h * 0.34, 6,
+                  'crystal', bevel_w=0.0)
+        core = cyl((sx, 0.04 + h * 0.18, sz), r * 0.42, r * 0.30, h * 0.42, 6,
+                   'glow_cyan', bevel_w=0.0)
+        for part in (body, tip, core):
+            mark_flat(part)
+            rot(part, lz, 'Z', (sx, 0.04, sz))
+            rot(part, lx, 'X', (sx, 0.04, sz))
+            m.add(part)
+    return m
+
+
+def build_boulder():
+    """Boulder: angular rock.
+
+    The procedural version is a noise-displaced sphere, which reads as a
+    potato. Large flat facets with hard edges read as stone, and they also
+    catch the cliff texture the renderer assigns this mesh far better than a
+    smoothly undulating surface does.
+    """
+    m = Model(MESH_BOULDER, 'BOULDER')
+    m.add(blob((0, 0.18, 0), 0.80, 8, 5, 7, 0.72, 'rock'))
+    m.add(blob((0.44, 0.10, -0.30), 0.38, 6, 4, 21, 0.85, 'rock'))
+    m.add(blob((-0.36, 0.08, 0.34), 0.31, 6, 4, 33, 0.85, 'rock'))
     return m
 
 
@@ -605,6 +862,7 @@ def build_bunkhouse():
 BUILDERS = [
     build_worker, build_trooper, build_mauler_hull, build_mauler_turret,
     build_foundry, build_garrison, build_workshop, build_bunkhouse,
+    build_ore, build_boulder,
 ]
 
 

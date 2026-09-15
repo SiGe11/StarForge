@@ -37,23 +37,32 @@ from mathutils import Matrix, Vector
 # so anything above 0 glows and, per the object shader, anything at or above
 # 0.5 also suppresses the detail texture.
 MATERIALS = {
-    'armor':      (0.70, 0.69, 0.64, 0.55, 0.30, 0.0, 0.0, 1.0),
-    'armor_dark': (0.46, 0.46, 0.44, 0.60, 0.25, 0.0, 0.0, 1.0),
-    'dark':       (0.15, 0.16, 0.18, 0.88, 0.05, 0.0, 0.0, 1.0),
-    'steel':      (0.55, 0.57, 0.61, 0.45, 0.75, 0.0, 0.0, 1.0),
-    'rubber':     (0.11, 0.11, 0.12, 0.95, 0.00, 0.0, 0.0, 0.9),
-    'team':       (0.70, 0.69, 0.64, 0.50, 0.20, 1.0, 0.0, 1.0),
-    'team_dark':  (0.48, 0.47, 0.44, 0.58, 0.25, 1.0, 0.0, 1.0),
+    # Values, not just hues. The palette these replace put almost every
+    # surface at 0.70 albedo, which is roughly four times what buildScene is
+    # calibrated for -- CLAUDE.md notes that a ~0.18 albedo is what lands near
+    # mid-grey after ACES and gamma. Everything therefore clipped toward white,
+    # and a model with no value range reads as a flat blob no matter how much
+    # geometry is in it. These span 0.04 to 0.46 so that recesses, running
+    # gear, plate and accents separate at distance.
+    'armor':      (0.38, 0.375, 0.35, 0.55, 0.30, 0.0, 0.0, 1.0),
+    'armor_lit':  (0.46, 0.45, 0.42, 0.48, 0.32, 0.0, 0.0, 1.0),
+    'armor_dark': (0.17, 0.17, 0.165, 0.62, 0.25, 0.0, 0.0, 1.0),
+    'dark':       (0.055, 0.058, 0.065, 0.88, 0.05, 0.0, 0.0, 1.0),
+    'steel':      (0.26, 0.27, 0.29, 0.38, 0.85, 0.0, 0.0, 1.0),
+    'rubber':     (0.035, 0.035, 0.038, 0.95, 0.00, 0.0, 0.0, 0.85),
+    'team':       (0.42, 0.41, 0.38, 0.50, 0.20, 1.0, 0.0, 1.0),
+    'team_dark':  (0.20, 0.20, 0.19, 0.58, 0.25, 1.0, 0.0, 1.0),
+    'rust':       (0.20, 0.135, 0.085, 0.80, 0.10, 0.0, 0.0, 1.0),
     'glow_warm':  (1.00, 0.82, 0.45, 0.25, 0.00, 0.0, 2.6, 1.0),
     'glow_dim':   (1.00, 0.80, 0.42, 0.30, 0.00, 0.0, 1.4, 1.0),
     'glow_cyan':  (0.30, 0.82, 1.00, 0.18, 0.00, 0.0, 2.4, 1.0),
     'glow_amber': (0.92, 0.38, 0.14, 0.30, 0.00, 0.0, 2.0, 1.0),
     'crystal':    (0.32, 0.78, 0.95, 0.16, 0.15, 0.0, 0.55, 1.0),
-    'rock':       (0.34, 0.32, 0.30, 0.92, 0.00, 0.0, 0.0, 1.0),
+    'rock':       (0.19, 0.18, 0.17, 0.92, 0.00, 0.0, 0.0, 1.0),
     # Deep recesses. Baking the occlusion into ao costs nothing at runtime and
     # gives panel gaps and wheel wells a shadow the lighting alone will not
     # produce at this scale.
-    'shadowed':   (0.30, 0.30, 0.30, 0.85, 0.10, 0.0, 0.0, 0.45),
+    'shadowed':   (0.10, 0.10, 0.10, 0.85, 0.10, 0.0, 0.0, 0.30),
 }
 MAT_NAMES = list(MATERIALS.keys())
 MAT_INDEX = {n: i for i, n in enumerate(MAT_NAMES)}
@@ -63,6 +72,19 @@ MAT_LAYER = 'sfmat'
 # Intended extents per part, keyed by id(bmesh), filled in by the primitives
 # and checked at export. See check_bounds() for why this exists.
 _EXPECT = {}
+
+# Parts that must be shaded flat, keyed by id(bmesh). SMOOTH_ANGLE averages
+# normals across any pair of faces meeting at less than 38 degrees, which is
+# what lets a bevel blend into the curve it rounds. On a displaced rock the
+# facets meet at 20 to 30 degrees, so the same rule averages the entire
+# surface and the result reads as a smooth mound rather than as stone. Faceted
+# shapes opt out and keep their face normals.
+_FLAT = set()
+
+
+def mark_flat(bm):
+    _FLAT.add(id(bm))
+    return bm
 
 
 def expect_bounds(bm, lo, hi, label):
@@ -226,6 +248,37 @@ def face_facing(bm, axis, sign, max_deg=15.0):
     return out
 
 
+def face_plate(bm, axis, sign, max_deg=42.0, area_frac=0.45):
+    """The large plate facing a direction, without its bevel trim.
+
+    face_facing() thresholds on angle, which works for a flat box top but
+    fails the moment the plate itself is tilted. A battered fortress wall
+    leans about 14 degrees, so a threshold loose enough to include the wall is
+    also loose enough to include the bevel strips along its edges -- and
+    running inset_region over a plate plus its surrounding trim tears the part
+    open, exactly as it did on the trooper's torso. Tightening the angle does
+    not help: below the wall's own tilt it selects nothing at all.
+
+    What separates a wall from its trim at any slope is area. The plate is
+    orders of magnitude larger than the strips beside it, so this takes the
+    largest candidate and anything within `area_frac` of it (which keeps a
+    plate that got split into two quads), and drops the rest.
+    """
+    a = {'x': 0, 'y': 1, 'z': 2}[axis]
+    lim = math.cos(math.radians(max_deg))
+    cand = []
+    for f in bm.faces:
+        n = f.normal
+        if n.length < 1e-8:
+            continue
+        if (n[a] * sign) >= lim:
+            cand.append((f.calc_area(), f))
+    if not cand:
+        return []
+    top = max(c[0] for c in cand)
+    return [f for ar, f in cand if ar >= top * area_frac]
+
+
 def inset(bm, faces, thickness, depth=0.0, mat=None):
     """Inset a face and optionally push it in, the standard way to read a
     panel, hatch or vent as recessed rather than painted on."""
@@ -285,8 +338,49 @@ def wedge(center, half, top_shrink_z, top_shrink_x, mat='armor',
     if bevel_w > 0:
         bevel(bm, bevel_w, bevel_seg)
     expect_bounds(bm,
-                  [center[i] - half[i] for i in range(3)],
-                  [center[i] + half[i] for i in range(3)], 'wedge%s' % (center,))
+                  [center[0] - max(hx, tx), center[1] - hy, center[2] - max(hz, tz)],
+                  [center[0] + max(hx, tx), center[1] + hy, center[2] + max(hz, tz)],
+                  'wedge%s' % (center,))
+    return bm
+
+
+def frustum(center, half, top=(1.0, 1.0), shift=(0.0, 0.0), mat='armor',
+            bevel_w=0.03, bevel_seg=None):
+    """Box whose top face has its own X and Z scale, and can be slid sideways.
+
+    wedge() can only shrink a top face, so everything built from it comes out
+    as a box with a slightly smaller lid -- which is still a box. This takes
+    independent top scales, so the top may be *wider* than the bottom (flared
+    track pods, cantilevered decks, battered fortress walls seen upside down)
+    or offset (leaning masts, overhanging bustles). Nearly every silhouette
+    here that does not read as a rectangle comes from this.
+
+    `top` scales (half.x, half.z) at the top face; `shift` slides it in (x, z).
+    """
+    cx, cy, cz = center
+    hx, hy, hz = half
+    tx, tz = hx * top[0], hz * top[1]
+    if bevel_seg is None:
+        bevel_seg = 1 if min(hx, hy, hz) < 0.13 else 2
+    bm = new_bm()
+    bmesh.ops.create_cube(bm, size=1.0)
+    for v in bm.verts:
+        sx = 1.0 if v.co.x > 0 else -1.0
+        sy = 1.0 if v.co.y > 0 else -1.0
+        sz = 1.0 if v.co.z > 0 else -1.0
+        if sy > 0:
+            v.co = Vector((cx + shift[0] + sx * tx, cy + hy, cz + shift[1] + sz * tz))
+        else:
+            v.co = Vector((cx + sx * hx, cy - hy, cz + sz * hz))
+    bm.normal_update()
+    set_mat(bm, bm.faces[:], mat)
+    if bevel_w > 0:
+        bevel(bm, bevel_w, bevel_seg)
+    # The box the part may legitimately occupy is the union of both faces.
+    lox = min(cx - hx, cx + shift[0] - tx); hix = max(cx + hx, cx + shift[0] + tx)
+    loz = min(cz - hz, cz + shift[1] - tz); hiz = max(cz + hz, cz + shift[1] + tz)
+    expect_bounds(bm, [lox, cy - hy, loz], [hix, cy + hy, hiz],
+                  'frustum%s' % (center,))
     return bm
 
 
@@ -465,23 +559,30 @@ def blob(center, r, u_seg, v_seg, seed, amount, mat='rock'):
     rng = random.Random(seed)
     bm = new_bm()
     bmesh.ops.create_uvsphere(bm, u_segments=u_seg, v_segments=v_seg, radius=r)
-    # Three low-frequency lobes give large faces; per-vertex jitter alone just
-    # roughens the surface without changing the silhouette.
+    # Low-frequency lobes change the silhouette; per-vertex jitter alone only
+    # roughens a surface that is still round. Both, plus flat shading, are what
+    # make this read as rock instead of as a potato.
     lobes = [(Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-1, 1))).normalized(),
-              rng.uniform(0.12, 0.34)) for _ in range(4)]
+              rng.uniform(0.18, 0.46)) for _ in range(5)]
     for v in bm.verts:
         d = v.co.normalized()
-        s = 1.0
+        sc = 1.0
         for axis, amp in lobes:
-            s += amp * amount * max(0.0, d.dot(axis)) ** 1.5
-        s += rng.uniform(-0.05, 0.05) * amount
-        v.co = d * (r * s)
+            sc += amp * amount * max(0.0, d.dot(axis)) ** 1.3
+        sc += rng.uniform(-0.16, 0.16) * amount
+        # Flatten the underside: a rock is bedded into the ground, not a ball
+        # resting on it, and the flat bottom also removes the geometry that
+        # would otherwise sit below the origin.
+        v.co = d * (r * sc)
+        if v.co.y < -r * 0.45:
+            v.co.y = -r * 0.45
     bm.normal_update()
-    bmesh.ops.dissolve_limit(bm, angle_limit=math.radians(12),
+    bmesh.ops.dissolve_limit(bm, angle_limit=math.radians(9),
                              verts=bm.verts[:], edges=bm.edges[:])
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     xform(bm, Matrix.Translation(Vector(center)))
     set_mat(bm, bm.faces[:], mat)
+    mark_flat(bm)
     return bm
 
 
@@ -519,7 +620,7 @@ class Model:
 SMOOTH_ANGLE = math.radians(38.0)
 
 
-def _split_normals(bm):
+def _split_normals(bm, flat=False):
     """Per-corner normals with a hard-edge threshold.
 
     Blender's own auto-smooth moved from a mesh flag to a modifier in 4.1 and
@@ -535,6 +636,11 @@ def _split_normals(bm):
     distinct vertices.
     """
     out = {}
+    if flat:
+        for f in bm.faces:
+            for loop in f.loops:
+                out[loop] = Vector(f.normal)
+        return out
     cos_lim = math.cos(SMOOTH_ANGLE)
     for f in bm.faces:
         fn = f.normal
@@ -595,7 +701,7 @@ def tessellate(model):
                               ngon_method='BEAUTY')
         bm.normal_update()
         lay = _layer(bm)
-        normals = _split_normals(bm)
+        normals = _split_normals(bm, flat=(id(bm) in _FLAT))
         for f in bm.faces:
             if f.calc_area() < 1e-9:
                 continue

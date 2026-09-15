@@ -119,11 +119,10 @@ There are two sources of geometry, and the second one is optional:
 
 - `gfx/MeshGen.cpp` builds every mesh from boxes, cylinders, spheres and
   jittered blobs. This is the fallback and it must keep working on its own.
-- `assets/models.bin` holds Blender-authored versions of the eight unit and
-  building meshes, authored by `tools/blender/build_models.py` and loaded by
-  `readModelPack` in MeshGen.cpp. Ore, boulder, projectile and the selection
-  ring stay procedural -- a jittered blob, a box and a flat ring gain nothing
-  from a modelling package.
+- `assets/models.bin` holds Blender-authored versions of ten of the twelve
+  meshes, authored by `tools/blender/build_models.py` and loaded by
+  `readModelPack` in MeshGen.cpp. The projectile and the selection ring stay
+  procedural -- a box and a flat ring gain nothing from a modelling package.
 
 Delete `assets/models.bin` and the game still runs, just with the primitives;
 this is the same contract as the textures beside it. **Nothing in the build
@@ -292,6 +291,41 @@ and run-to-run variance is about +/-1 ms.
   its log -- removed the penalty. On a TBDR part ALU is cheap and the texture
   cache is not; a fetch only wins when neighbouring pixels want neighbouring
   texels. Check any sampler fed by a perspective divide for this.
+
+- **Silhouette is the whole game at RTS camera distance.** The first pass at
+  the Blender models ported dimensions straight across from MeshGen.cpp and
+  added bevels and panel insets to them. Triangle count went up nine times and
+  the result looked the same, because every shape was still a rectangular
+  prism and detail below a few pixels does not survive the camera. What
+  changed the read was rebuilding the outlines: `frustum()` (a box whose top
+  face has its own X and Z scale and can be slid sideways) is what most of
+  them are made of, because it is the cheapest way to get a shape that is not
+  a box. Judge a model by its cast shadow, not by its wireframe.
+
+- **The old palette was about four times too bright.** Nearly every surface
+  was at 0.70 albedo, against a `buildScene` calibrated so ~0.18 lands near
+  mid-grey after ACES and gamma. Everything clipped toward white, so no
+  geometry read regardless of how much of it there was. The model pack's
+  palette spans 0.04 to 0.46; `MeshGen.cpp`'s procedural palette has **not**
+  been changed to match, so the fallback still renders brighter than the pack.
+
+- **Rock needs flat shading, and 38 degrees is not enough to get it.**
+  `SMOOTH_ANGLE` averages normals across any two faces meeting at less than 38
+  degrees, which is what lets a bevel blend into the curve it rounds. The
+  facets of a displaced-sphere rock meet at 20 to 30 degrees, so the same rule
+  smooths the entire surface and stone renders as a balloon. `mark_flat()`
+  opts a part out and keeps its face normals.
+
+- **Selecting a plate by angle fails on a plate that is itself tilted.** The
+  bevel-strip trap below has a second form that a tighter angle cannot fix. A
+  battered fortress wall leans about 14 degrees, so any threshold loose enough
+  to admit the wall also admits its bevel trim, and one tight enough to
+  exclude the trim excludes the wall as well -- measured at 15 degrees it
+  selected five faces and tore the part open, at 8 degrees it selected none.
+  Area separates them at any slope, because a wall is orders of magnitude
+  larger than the strips around it: `face_plate()` takes the largest candidate
+  and anything within 45% of it. Use it for anything that gets inset;
+  `face_facing()` is only safe on a genuinely axis-aligned face.
 
 - **Selecting faces by normal after a bevel picks up the bevel.** The Blender
   models are bevelled before anything is selected on them, and an n-segment

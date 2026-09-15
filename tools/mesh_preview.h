@@ -112,10 +112,98 @@ struct Framebuffer {
                                 emisMask((size_t)W * H, 0) {}
 };
 
+// ---------------------------------------------------------------- shadows
+//
+// A flat-lit preview is a forgiving preview: without a cast shadow, a shape
+// assembled from parts reads as a pile of separately shaded pieces, and a
+// silhouette that is actually a box looks acceptable. The game has a shadow
+// pass, so judging models without one means judging them in a view that does
+// not exist. This is a plain orthographic depth map along the sun direction.
+struct ShadowMap {
+    int size = 0;
+    float extent = 1.0f;
+    v3 right, up, dir;      // dir is the direction light travels
+    v3 centre;
+    std::vector<float> depth;
+
+    bool project(v3 p, float& u, float& v, float& d) const {
+        v3 o = p - centre;
+        u = (dot(o, right) / extent * 0.5f + 0.5f) * size;
+        v = (dot(o, up) / extent * 0.5f + 0.5f) * size;
+        d = dot(o, dir);
+        return u >= 0 && v >= 0 && u < size && v < size;
+    }
+};
+
+inline ShadowMap buildShadow(const std::vector<MeshVertex>& V,
+                             const std::vector<uint32_t>& I,
+                             const MeshRange& R, v3 sunDir, int size = 768) {
+    ShadowMap sm;
+    sm.size = size;
+    sm.dir = normalize(sunDir * -1.0f);
+    sm.right = normalize(cross(sm.dir, v3{0, 1, 0}));
+    sm.up = cross(sm.right, sm.dir);
+    sm.centre = v3{0.0f, R.height * 0.5f, 0.0f};
+    sm.extent = std::max({R.radius * 2.4f, R.height * 2.0f, 1.0f});
+    sm.depth.assign((size_t)size * size, 1e30f);
+
+    for (uint32_t k = 0; k < R.indexCount; k += 3) {
+        float px[3], py[3], pz[3];
+        for (int i = 0; i < 3; i++) {
+            const MeshVertex& mv = V[I[R.firstIndex + k + i] + R.baseVertex];
+            sm.project(v3{mv.px, mv.py, mv.pz}, px[i], py[i], pz[i]);
+        }
+        float ar = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+        if (std::fabs(ar) < 1e-9f) continue;
+        float inv = 1.0f / ar;
+        int minx = std::max(0, (int)std::floor(std::min({px[0], px[1], px[2]})));
+        int maxx = std::min(size - 1, (int)std::ceil(std::max({px[0], px[1], px[2]})));
+        int miny = std::max(0, (int)std::floor(std::min({py[0], py[1], py[2]})));
+        int maxy = std::min(size - 1, (int)std::ceil(std::max({py[0], py[1], py[2]})));
+        for (int y = miny; y <= maxy; y++)
+            for (int x = minx; x <= maxx; x++) {
+                float fx = x + 0.5f, fy = y + 0.5f;
+                float w0 = ((px[1]-fx)*(py[2]-fy) - (px[2]-fx)*(py[1]-fy)) * inv;
+                float w1 = ((px[2]-fx)*(py[0]-fy) - (px[0]-fx)*(py[2]-fy)) * inv;
+                float w2 = 1.0f - w0 - w1;
+                if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                float d = w0*pz[0] + w1*pz[1] + w2*pz[2];
+                size_t di = (size_t)y * size + x;
+                if (d < sm.depth[di]) sm.depth[di] = d;
+            }
+    }
+    return sm;
+}
+
+inline float sampleShadow(const ShadowMap& sm, v3 p, float ndl,
+                          v3 n = v3{0, 0, 0}) {
+    if (!sm.size) return 1.0f;
+    // Normal offset. A depth bias alone has to grow with the surface slope to
+    // stop self-shadowing, and by the time it is large enough for a face
+    // nearly edge-on to the light it is large enough to detach contact
+    // shadows elsewhere. Moving the sample point off the surface along its
+    // own normal by about a texel scales correctly by construction, and is
+    // what stops large flat plates striping with acne.
+    float texel = sm.extent * 2.0f / (float)sm.size;
+    float slope = std::sqrt(std::max(0.0f, 1.0f - ndl * ndl)) / std::max(ndl, 0.15f);
+    v3 sp = p + n * (texel * (1.2f + 1.8f * std::min(slope, 3.0f)));
+    float u, v, d;
+    if (!sm.project(sp, u, v, d)) return 1.0f;
+    float bias = texel * 0.75f;
+    float lit = 0.0f;
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            int x = (int)u + i, y = (int)v + j;
+            if (x < 0 || y < 0 || x >= sm.size || y >= sm.size) { lit += 1.0f; continue; }
+            lit += (d - bias <= sm.depth[(size_t)y * sm.size + x]) ? 1.0f : 0.0f;
+        }
+    return lit / 9.0f;
+}
+
 // Draws a ground plane under the model with a soft contact darkening. Without
 // it every model floats in sky and its scale and footprint are unreadable.
 inline void drawGround(Framebuffer& fb, const Cam& cam, float ox, float oy,
-                       float scl, float radius) {
+                       float scl, float radius, const ShadowMap* sm = nullptr) {
     float cy = std::cos(cam.yaw), sy = std::sin(cam.yaw);
     float cp = std::cos(cam.pitch), sp = std::sin(cam.pitch);
     v3 fwd{ -sy * cp, -sp, -cy * cp };
@@ -149,7 +237,10 @@ inline void drawGround(Framebuffer& fb, const Cam& cam, float ox, float oy,
             // shadeAndDraw writes tonemapped, gamma-encoded values into this
             // buffer, so the ground has to be encoded the same way or a
             // perfectly ordinary linear 0.3 renders as near-black.
-            float g = 0.34f * (0.35f + 0.65f * fade) * (1.0f - 0.60f * contact * contact);
+            float g = 0.34f * (0.35f + 0.65f * fade) * (1.0f - 0.25f * contact * contact);
+            // The cast shadow on the ground is most of what makes a
+            // silhouette legible, so it is worth more here than anywhere.
+            if (sm) g *= 0.30f + 0.70f * sampleShadow(*sm, hit, 0.7f, v3{0, 1, 0});
             auto enc = [](float v) { return std::pow(saturate(v), 1.0f / 2.2f); };
             fb.color[di * 3 + 0] = enc(g * 1.00f);
             fb.color[di * 3 + 1] = enc(g * 0.97f);
@@ -179,7 +270,8 @@ inline void shadeAndDraw(Framebuffer& fb,
                          const std::vector<MeshVertex>& V,
                          const std::vector<uint32_t>& I,
                          const MeshRange& R, const Cam& cam,
-                         v3 teamColor, float ox, float oy, float scl) {
+                         v3 teamColor, float ox, float oy, float scl,
+                         const ShadowMap* sm = nullptr) {
     const v3 sunDir = normalize(v3{0.62f, 0.66f, 0.42f});
     // Calibrated the way CLAUDE.md describes buildScene's set: a ~0.18 albedo
     // must land near mid-grey once ACES and gamma have been applied. Guessing
@@ -258,13 +350,22 @@ inline void shadeAndDraw(Framebuffer& fb,
                 alb = alb * (1.0f - team) + teamColor * team;
 
                 float ndl = std::max(0.0f, dot(n, sunDir));
+                v3 wp{w0*tv[0]->px + w1*tv[1]->px + w2*tv[2]->px,
+                      w0*tv[0]->py + w1*tv[1]->py + w2*tv[2]->py,
+                      w0*tv[0]->pz + w1*tv[1]->pz + w2*tv[2]->pz};
+                if (sm) ndl *= sampleShadow(*sm, wp, ndl, n);
                 v3 vdir = normalize(eye - v3{0, 0, 0});
                 v3 hv = normalize(sunDir + vdir);
                 float spec = std::pow(std::max(0.0f, dot(n, hv)),
                                       std::max(2.0f, 2.0f / (rough * rough + 1e-3f)));
                 float sky = 0.5f + 0.5f * n.y;
 
-                v3 c = alb * (ndl * sunI + ambient * sky * ao)
+                // Weak fill from the opposite side. Without it every surface
+                // facing away from the sun collapses to one ambient value and
+                // the shaded half of a model loses all its form.
+                const v3 fillDir = normalize(v3{-0.55f, 0.35f, -0.75f});
+                float fill = std::max(0.0f, dot(n, fillDir)) * 0.30f;
+                v3 c = alb * (ndl * sunI + fill + ambient * sky * ao)
                      + v3{1.0f, 0.96f, 0.9f} * (spec * (1.0f - rough) * sunI * 0.5f)
                      + alb * emis;
                 c = c * exposure;

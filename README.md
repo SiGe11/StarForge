@@ -144,34 +144,49 @@ noise threshold. The glyph atlas for the HUD is rasterised with CoreText at laun
 
 ## Models
 
-The eight unit and building meshes are modelled in Blender and shipped as a
-single binary, `assets/models.bin`:
+Ten of the twelve meshes are modelled in Blender and shipped as a single
+binary, `assets/models.bin`:
 
 | Mesh | Triangles | Was |
 |---|---|---|
-| Digger (worker) | 3156 | 140 |
-| Trooper | 3064 | 300 |
-| Mauler hull | 3772 | 416 |
-| Mauler turret | 1600 | 148 |
+| Digger (worker) | 3588 | 140 |
+| Trooper | 2604 | 300 |
+| Mauler hull | 3732 | 416 |
+| Mauler turret | 1620 | 148 |
 | Foundry | 3788 | 304 |
-| Garrison | 2036 | 144 |
-| Workshop | 1624 | 268 |
-| Bunkhouse | 2032 | 176 |
+| Garrison | 2552 | 144 |
+| Workshop | 2576 | 268 |
+| Bunkhouse | 1132 | 176 |
+| Ore seam | 450 | 220 |
+| Boulder | 124 | 168 |
 
-The library totals 21568 triangles against 2392 before. The heaviest unit is
-the Mauler at 5372 for hull plus turret, so a `--stress 200` load is on the
+The library totals 22274 triangles against 2392 before. The heaviest unit is
+the Mauler at 5352 for hull plus turret, so a `--stress 200` load is on the
 order of 1.5M triangles, doubled again by the shadow pass. That has not been
 measured on Apple hardware — see **What this is not**.
 
-Ore seams, boulders, projectiles and the selection ring are still built from
-primitives in `MeshGen.cpp` — a jittered blob, a box and a flat ring gain
-nothing from a modelling package.
+Projectiles and the selection ring are still built from primitives in
+`MeshGen.cpp` — a box and a flat ring gain nothing from a modelling package.
 
-The extra triangles buy three things, in order of how much they change the read
-at RTS camera distance: a bevel on every silhouette edge, so plates catch a
-specular highlight instead of reading as one flat tone; recessed panels, hatches
-and vents; and mechanical parts the primitives only implied — road wheels that
-differ from drive sprockets, tread blocks, jointed limbs, a stepped gun barrel.
+What the triangles are actually spent on, in order of how much each changes the
+read at RTS camera distance:
+
+1. **Silhouette.** At a hundred metres a unit is an outline, so the shapes are
+   built around their outlines: the Digger is a raked wedge with a cutter arm
+   out front and an ore drum slung across the back, the Trooper has oversized
+   pauldrons over a pinched waist, the Mauler is an arrow with a stepped engine
+   deck, the Workshop sits under a straddle crane, the Foundry steps three
+   times from a buttressed base to a narrow head. Detail added to a box still
+   reads as a box.
+2. **Value range.** The palette these replace put nearly every surface at 0.70
+   albedo, roughly four times what `buildScene` is calibrated for, so
+   everything clipped toward white and no amount of geometry showed through.
+   The pack spans 0.04 to 0.46.
+3. **Bevels**, so plates catch a specular highlight instead of reading as one
+   flat tone, plus recessed panels, hatches and vents.
+4. **Mechanical parts the primitives only implied** — tracks modelled as loops
+   with the running gear visible inside them, road wheels distinct from drive
+   sprockets, jointed limbs, a stepped gun barrel with a slotted brake.
 
 **The pack is optional.** Delete it and the game runs on the primitives, the
 same way it runs without `assets/` textures. Nothing in the build depends on
