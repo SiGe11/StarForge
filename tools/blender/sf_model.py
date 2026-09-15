@@ -363,6 +363,67 @@ def tube(base, r_out, r_in, h, seg, mat='steel', axis='y'):
     return bm
 
 
+def track_loop(x, y_axle, half_len, r, width, thickness, seg_arc=8,
+               mat='rubber'):
+    """A tank track: a stadium-shaped loop with wall thickness, not a block.
+
+    Modelling it as a solid box has two costs. The obvious one is that it
+    reads as a plinth. The subtle one is that every road wheel then sits
+    *inside* it, fully enclosed, contributing nothing on screen while still
+    costing triangles and shadow-pass fill -- the same buried-geometry waste as
+    an emissive band inside a hull.
+
+    As a loop, the running gear is visible through the opening, which is what a
+    tracked vehicle actually looks like from the side, and the inner radius can
+    be set to the road-wheel radius so the wheels meet the track exactly.
+
+    (An earlier version tried to round just the ends of a solid box by moving
+    vertices with |z| past a threshold. A box has no vertices between its
+    faces, so the test matched every one of them and squashed the whole band,
+    leaving the wheels poking out above and below it.)
+    """
+    L = max(half_len - r, 1e-4)
+
+    def profile(rad):
+        pts = []
+        for i in range(seg_arc + 1):          # front arc, top round to bottom
+            a = math.pi * 0.5 - math.pi * i / seg_arc
+            pts.append((y_axle + math.sin(a) * rad, L + math.cos(a) * rad))
+        for i in range(seg_arc + 1):          # rear arc, bottom round to top
+            a = -math.pi * 0.5 - math.pi * i / seg_arc
+            pts.append((y_axle + math.sin(a) * rad, -L + math.cos(a) * rad))
+        return pts
+
+    outer = profile(r)
+    inner = profile(max(r - thickness, 1e-3))
+    x0, x1 = x - width * 0.5, x + width * 0.5
+
+    bm = new_bm()
+    def ring(pts, xc):
+        return [bm.verts.new((xc, py, pz)) for py, pz in pts]
+    o0, o1 = ring(outer, x0), ring(outer, x1)
+    i0, i1 = ring(inner, x0), ring(inner, x1)
+    bm.verts.ensure_lookup_table()
+
+    n = len(outer)
+    for k in range(n):
+        j = (k + 1) % n
+        for quad in ((o0[k], o0[j], o1[j], o1[k]),     # outer wall
+                     (i0[k], i0[j], i1[j], i1[k]),     # inner wall
+                     (o0[k], o0[j], i0[j], i0[k]),     # x0 rim
+                     (o1[k], o1[j], i1[j], i1[k])):    # x1 rim
+            try:
+                bm.faces.new(quad)
+            except ValueError:
+                pass
+    bm.normal_update()
+    # The loop is closed and manifold, so recalc settles every face outward
+    # rather than relying on four hand-wound quad orderings being consistent.
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    set_mat(bm, bm.faces[:], mat)
+    return bm
+
+
 def sphere(center, r, u_seg=12, v_seg=8, mat='armor'):
     bm = new_bm()
     bmesh.ops.create_uvsphere(bm, u_segments=u_seg, v_segments=v_seg, radius=r)

@@ -43,7 +43,8 @@ from mathutils import Matrix, Vector
 
 import sf_model as S
 from sf_model import (Model, box, wedge, cyl, tube, sphere, ring_flat, blob,
-                      inset, set_mat, xform, bevel, face_facing, cone_radius_at)
+                      inset, set_mat, xform, bevel, face_facing, cone_radius_at,
+                      track_loop)
 
 # MeshId values, mirroring the enum in src/gfx/RenderTypes.h.
 MESH_WORKER, MESH_TROOPER, MESH_MAULER_HULL, MESH_MAULER_TURRET = 0, 1, 2, 3
@@ -98,29 +99,30 @@ def track_unit(m, x, wheel_r, wheel_n, half_len, y_axle, width, tread=True):
     from idler from road wheel is what makes a tracked vehicle read as tracked
     rather than as a box on a plinth."""
     # The running gear defines where the vehicle meets the ground, so the
-    # bottom of the track band is pinned to y=0. Geometry below the origin
+    # bottom of the track loop is pinned to y=0. Geometry below the origin
     # sinks into the terrain, and on a slope it clips through it.
-    y_axle = max(y_axle, wheel_r + 0.10)
-    band = box((x, y_axle, 0.0), (width * 0.5, wheel_r + 0.10, half_len),
-               'rubber', bevel_w=min(0.07, wheel_r * 0.35), bevel_seg=2)
-    # Round the ends of the track so it reads as wrapping the wheels.
-    for v in band.verts:
-        if abs(v.co.z) > half_len * 0.78:
-            v.co.y = y_axle + (v.co.y - y_axle) * 0.72
-    band.normal_update()
-    m.add_mirrored(band)
+    outer_r = wheel_r + 0.10
+    y_axle = max(y_axle, outer_r)
+    # Inner radius set to the road-wheel radius, so the wheels meet the track
+    # exactly instead of floating inside it or cutting through.
+    m.add_mirrored(track_loop(x, y_axle, half_len, outer_r, width,
+                              outer_r - wheel_r, seg_arc=max(5, int(wheel_r * 18))))
 
     if tread:
-        # Tread blocks along the bottom run. The repetition is what the eye
-        # reads as "track" in motion, so the count matters more than the
-        # shape: these are 1-segment chamfers, not rounded blocks.
+        # Tread shoes on both straight runs. The repetition is what the eye
+        # reads as "track" in motion, so the count matters more than the shape:
+        # these are 1-segment chamfers, not rounded blocks. The top run matters
+        # as much as the bottom because the game's camera looks down at the
+        # vehicle -- the bottom run is the one the player never sees.
         n = max(4, int(half_len * 2.6))
+        run = half_len - wheel_r
         for i in range(n):
             t = (i + 0.5) / n * 2.0 - 1.0
-            blk = box((x, 0.045, t * half_len * 0.92),
-                      (width * 0.56, 0.045, half_len / n * 0.34),
-                      'dark', bevel_w=0.015, bevel_seg=1)
-            m.add_mirrored(blk)
+            for y_run in (0.04, y_axle * 2.0 - 0.04):
+                blk = box((x, y_run, t * run * 0.98),
+                          (width * 0.53, 0.04, run / n * 0.40),
+                          'dark', bevel_w=0.012, bevel_seg=1)
+                m.add_mirrored(blk)
 
     for i in range(wheel_n):
         t = (i / max(1, wheel_n - 1)) * 2.0 - 1.0
