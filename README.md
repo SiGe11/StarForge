@@ -2,6 +2,7 @@
 
 A 3D real-time strategy game in C++ for Apple Silicon Macs. StarCraft-style base
 building, resource gathering and combat, rendered with a modern Metal pipeline.
+Note: This whole project is for testing Claude capabilities.
 
 Zero external dependencies — no SDL, no CMake, no Homebrew packages, no engine.
 Just `make`.
